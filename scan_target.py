@@ -152,16 +152,26 @@ def find_shot_hole(gray, tx, ty, r, search_radius):
     # exact radius or thickness, instead of guessing a safe gap/overlap.
     hole_contours, hierarchy = cv2.findContours(hole_thresh, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
 
-    max_hole_area = np.pi * (r * 0.35) ** 2  # secondary safety net
+    max_hole_area = np.pi * (r * 0.35) ** 2
 
     valid_holes = []
     if hierarchy is not None:
         for i, cnt in enumerate(hole_contours):
-            if hierarchy[0][i][2] != -1:   # has a child -> hollow ring, not a hole
-                continue
             area = cv2.contourArea(cnt)
             if area <= 15 or area > max_hole_area:
                 continue
+
+            # Only disqualify for "has a child" if that child (enclosed
+            # background) is a large share of the parent's own area --
+            # that's what a genuinely hollow printed ring looks like.
+            # A few stray noise pixels from torn edges/lighting inside an
+            # otherwise solid hole shouldn't disqualify it.
+            child_idx = hierarchy[0][i][2]
+            if child_idx != -1:
+                child_area = cv2.contourArea(hole_contours[child_idx])
+                if child_area > area * 0.3:
+                    continue
+
             perimeter = cv2.arcLength(cnt, True)
             circularity = (4 * np.pi * area) / (perimeter ** 2) if perimeter > 0 else 0
             if circularity > 0.35:
