@@ -129,13 +129,21 @@ def find_shot_hole(gray, tx, ty, r, search_radius):
     dist_map = np.hypot(xx - rel_tx, yy - rel_ty)
 
     # Zone A: inside the printed black circle -> hole reads bright against ink.
-    inside_mask = (dist_map <= r * 0.95).astype(np.uint8) * 255
+    # Extended slightly past the printed edge (1.02r instead of 0.95r) so a
+    # hole punched right on the ring boundary still falls inside this zone
+    # instead of a dead band between the two checks.
+    inside_mask = (dist_map <= r * 1.02).astype(np.uint8) * 255
     _, bright_thresh = cv2.threshold(roi_gray, 170, 255, cv2.THRESH_BINARY)
     bright_holes = cv2.bitwise_and(bright_thresh, inside_mask)
 
     # Zone B: outside the black circle, out to the usable search radius ->
     # hole reads as a shadowed/torn dark spot against the white paper.
-    outside_mask = ((dist_map >= r * 1.05) & (dist_map <= search_radius)).astype(np.uint8) * 255
+    # Starts slightly before the printed edge (0.98r instead of 1.05r) so
+    # zones A and B now overlap across the ring boundary instead of leaving
+    # a gap there. That gap (previously 0.95r-1.05r) was the bug: holes
+    # punched right on the printed edge were tested by neither zone and were
+    # never detected at all.
+    outside_mask = ((dist_map >= r * 0.98) & (dist_map <= search_radius)).astype(np.uint8) * 255
     _, dark_thresh = cv2.threshold(roi_gray, 140, 255, cv2.THRESH_BINARY_INV)
     dark_holes = cv2.bitwise_and(dark_thresh, outside_mask)
 
@@ -146,13 +154,19 @@ def find_shot_hole(gray, tx, ty, r, search_radius):
 
     hole_contours, _ = cv2.findContours(hole_thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-    # Circularity filter (same principle already used elsewhere in this file
-    # for bullseye detection) rejects thin printed scoring-ring lines/numbers
-    # in the white zone, which pass the dark threshold but aren't round blobs.
+    # Circularity + size filter (same principle already used elsewhere in
+    # this file for bullseye detection) rejects thin printed scoring-ring
+    # lines/numbers, which pass the dark threshold but aren't round blobs.
+    # Now that zones A and B overlap across the printed ring edge itself, we
+    # also cap the max area: without it, the ring edge (a large near-full
+    # circle) could pass the circularity check and get misdetected as one
+    # giant "hole". Real bullet holes are small relative to the black
+    # aiming mark, so anything much larger than a plausible hole is rejected.
+    max_hole_area = (r ** 2) * 0.8
     valid_holes = []
     for cnt in hole_contours:
         area = cv2.contourArea(cnt)
-        if area <= 15:
+        if area <= 15 or area > max_hole_area:
             continue
         perimeter = cv2.arcLength(cnt, True)
         circularity = (4 * np.pi * area) / (perimeter ** 2) if perimeter > 0 else 0
@@ -315,4 +329,4 @@ if __name__ == "__main__":
     for i in range(len(individual_scores)):
         print(f"Target {i+1}: Score = {individual_scores[i]} | Distance = {distances[i]} mm")
     print("------------------------------")
-    print(f"TOTAL SCORE: {total} / 109.0\n")    
+    print(f"TOTAL SCORE: {total} / 109.0\n")
