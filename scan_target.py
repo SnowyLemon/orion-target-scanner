@@ -128,13 +128,14 @@ def find_shot_hole(gray, tx, ty, r, search_radius):
     yy, xx = np.indices(roi_gray.shape)
     dist_map = np.hypot(xx - rel_tx, yy - rel_ty)
 
-    # Zone split with no gap and no overlap — meets exactly at the printed
-    # circle's radius.
-    inside_mask = (dist_map <= r).astype(np.uint8) * 255
+    # Zone A: inside the printed black circle -> hole reads bright against ink.
+    inside_mask = (dist_map <= r * 0.95).astype(np.uint8) * 255
     _, bright_thresh = cv2.threshold(roi_gray, 170, 255, cv2.THRESH_BINARY)
     bright_holes = cv2.bitwise_and(bright_thresh, inside_mask)
 
-    outside_mask = ((dist_map > r) & (dist_map <= search_radius)).astype(np.uint8) * 255
+    # Zone B: outside the black circle, out to the usable search radius ->
+    # hole reads as a shadowed/torn dark spot against the white paper.
+    outside_mask = ((dist_map >= r * 1.05) & (dist_map <= search_radius)).astype(np.uint8) * 255
     _, dark_thresh = cv2.threshold(roi_gray, 140, 255, cv2.THRESH_BINARY_INV)
     dark_holes = cv2.bitwise_and(dark_thresh, outside_mask)
 
@@ -143,39 +144,21 @@ def find_shot_hole(gray, tx, ty, r, search_radius):
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
     hole_thresh = cv2.morphologyEx(hole_thresh, cv2.MORPH_OPEN, kernel)
 
-    # RETR_CCOMP instead of RETR_EXTERNAL: gives parent/child hierarchy.
-    # A closed loop of ink-boundary pixels that passes the dark/outside
-    # test encloses a hollow center (the interior ink fails the bright
-    # test, so it's not part of hole_thresh) — that shows up as a contour
-    # WITH a child. A real bullet hole is a solid filled blob with no
-    # child. This rejects boundary-ring artifacts regardless of their
-    # exact radius or thickness, instead of guessing a safe gap/overlap.
-    hole_contours, hierarchy = cv2.findContours(hole_thresh, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+    hole_contours, _ = cv2.findContours(hole_thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-    max_hole_area = np.pi * (r * 0.35) ** 2
-
+    # Circularity filter (same principle already used elsewhere in this file
+    # for bullseye detection) rejects thin printed scoring-ring lines/numbers
+    # in the white zone, which pass the dark threshold but aren't round blobs.
+    
     valid_holes = []
-    if hierarchy is not None:
-        for i, cnt in enumerate(hole_contours):
-            area = cv2.contourArea(cnt)
-            if area <= 15 or area > max_hole_area:
-                continue
-
-            # Only disqualify for "has a child" if that child (enclosed
-            # background) is a large share of the parent's own area --
-            # that's what a genuinely hollow printed ring looks like.
-            # A few stray noise pixels from torn edges/lighting inside an
-            # otherwise solid hole shouldn't disqualify it.
-            child_idx = hierarchy[0][i][2]
-            if child_idx != -1:
-                child_area = cv2.contourArea(hole_contours[child_idx])
-                if child_area > area * 0.3:
-                    continue
-
-            perimeter = cv2.arcLength(cnt, True)
-            circularity = (4 * np.pi * area) / (perimeter ** 2) if perimeter > 0 else 0
-            if circularity > 0.35:
-                valid_holes.append(cnt)
+    for cnt in hole_contours:
+        area = cv2.contourArea(cnt)
+        if area <= 15:
+            continue
+        perimeter = cv2.arcLength(cnt, True)
+        circularity = (4 * np.pi * area) / (perimeter ** 2) if perimeter > 0 else 0
+        if circularity > 0.35:
+            valid_holes.append(cnt)
 
     if not valid_holes:
         return None, None, (x1, y1)
