@@ -129,7 +129,7 @@ def find_shot_hole(gray, tx, ty, r, search_radius):
     dist_map = np.hypot(xx - rel_tx, yy - rel_ty)
 
     # Zone A: inside the printed black circle -> hole reads bright against ink.
-    inside_mask = (dist_map <= r * 0.98).astype(np.uint8) * 255
+    inside_mask = (dist_map <= r * 0.95).astype(np.uint8) * 255
     _, bright_thresh = cv2.threshold(roi_gray, 170, 255, cv2.THRESH_BINARY)
     bright_holes = cv2.bitwise_and(bright_thresh, inside_mask)
 
