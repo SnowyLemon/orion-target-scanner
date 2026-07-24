@@ -128,14 +128,13 @@ def find_shot_hole(gray, tx, ty, r, search_radius):
     yy, xx = np.indices(roi_gray.shape)
     dist_map = np.hypot(xx - rel_tx, yy - rel_ty)
 
-    # Zone A: inside the printed black circle -> hole reads bright against ink.
-    inside_mask = (dist_map <= r * 1.05).astype(np.uint8) * 255
+    # Zone split with no gap and no overlap — meets exactly at the printed
+    # circle's radius.
+    inside_mask = (dist_map <= r).astype(np.uint8) * 255
     _, bright_thresh = cv2.threshold(roi_gray, 170, 255, cv2.THRESH_BINARY)
     bright_holes = cv2.bitwise_and(bright_thresh, inside_mask)
 
-    # Zone B: outside the black circle, out to the usable search radius ->
-    # hole reads as a shadowed/torn dark spot against the white paper.
-    outside_mask = ((dist_map >= r * 0.95) & (dist_map <= search_radius)).astype(np.uint8) * 255
+    outside_mask = ((dist_map > r) & (dist_map <= search_radius)).astype(np.uint8) * 255
     _, dark_thresh = cv2.threshold(roi_gray, 140, 255, cv2.THRESH_BINARY_INV)
     dark_holes = cv2.bitwise_and(dark_thresh, outside_mask)
 
@@ -144,24 +143,29 @@ def find_shot_hole(gray, tx, ty, r, search_radius):
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
     hole_thresh = cv2.morphologyEx(hole_thresh, cv2.MORPH_OPEN, kernel)
 
-    hole_contours, _ = cv2.findContours(hole_thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    # RETR_CCOMP instead of RETR_EXTERNAL: gives parent/child hierarchy.
+    # A closed loop of ink-boundary pixels that passes the dark/outside
+    # test encloses a hollow center (the interior ink fails the bright
+    # test, so it's not part of hole_thresh) — that shows up as a contour
+    # WITH a child. A real bullet hole is a solid filled blob with no
+    # child. This rejects boundary-ring artifacts regardless of their
+    # exact radius or thickness, instead of guessing a safe gap/overlap.
+    hole_contours, hierarchy = cv2.findContours(hole_thresh, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
 
-    # Reject implausibly large blobs (e.g. the printed black circle's own
-    # edge ring getting misclassified as "dark against outside" when the
-    # zones overlap near the true boundary). A real pellet hole is a small
-    # fraction of the aiming-mark radius (~4.5mm hole vs ~30.5mm mark), so
-    # anything close to the full circle's area is not a shot.
-    max_hole_area = np.pi * (r * 0.35) ** 2
+    max_hole_area = np.pi * (r * 0.35) ** 2  # secondary safety net
 
     valid_holes = []
-    for cnt in hole_contours:
-        area = cv2.contourArea(cnt)
-        if area <= 15 or area > max_hole_area:
-            continue
-        perimeter = cv2.arcLength(cnt, True)
-        circularity = (4 * np.pi * area) / (perimeter ** 2) if perimeter > 0 else 0
-        if circularity > 0.35:
-            valid_holes.append(cnt)
+    if hierarchy is not None:
+        for i, cnt in enumerate(hole_contours):
+            if hierarchy[0][i][2] != -1:   # has a child -> hollow ring, not a hole
+                continue
+            area = cv2.contourArea(cnt)
+            if area <= 15 or area > max_hole_area:
+                continue
+            perimeter = cv2.arcLength(cnt, True)
+            circularity = (4 * np.pi * area) / (perimeter ** 2) if perimeter > 0 else 0
+            if circularity > 0.35:
+                valid_holes.append(cnt)
 
     if not valid_holes:
         return None, None, (x1, y1)
