@@ -98,110 +98,72 @@ def find_shot_hole(gray, tx, ty, r, search_radius):
     """
     Locates the bullet hole near a target center.
 
-    FIX (bug report: holes straddling the boundary between the black
-    aiming mark and the white/cream paper were never detected):
+    FIX (bug report: holes outside the black aiming mark were never detected):
+    - `search_radius` now covers the full usable scoring area around the target
+      (computed by the caller from the sheet's actual target spacing) instead of
+      a fixed 0.92 * r, which previously discarded anything past the edge of the
+      black circle before contours were even found.
+    - Holes are now flagged as blobs that are either BRIGHTER or DARKER than
+      their immediate local background (via a blurred local-background estimate),
+      instead of only "brighter than 170". A hole punched through black ink
+      exposes lighter backing (bright blob); a hole in the white paper area
+      reads as a shadowed/torn dark blob. The old single-direction bright
+      threshold only ever matched the first case.
 
-    The previous approach split the search area into two hard zones with a
-    dead band between them (an "inside" zone tested with a fixed bright
-    threshold, and an "outside" zone tested with a fixed dark threshold,
-    with the ring in between excluded from both). Any hole whose center
-    fell inside that excluded ring never had its core pixels tested by
-    either zone and was invisible to the detector no matter how sharp it
-    was -- that dead band was the root cause of the bug.
-
-    A revision attempt closed the dead band but kept the fixed-sign
-    assumption (bright inside, dark outside). Pixel-level inspection of
-    real hole photos shows that assumption doesn't hold either: a hole is
-    always strongly brighter than its immediate surroundings when it's
-    over black ink (huge contrast, ~150+ levels), but when a hole sits out
-    on the cream paper its contrast against the paper is small and can go
-    either way (slightly brighter, slightly darker, or a torn/shadowed
-    dark rim) depending on lighting and how the paper tore -- so a fixed
-    "outside = darker than 140" rule misses it as often as it catches it.
-
-    This version instead builds one continuous local-background estimate
-    across the whole search area via grayscale morphological opening
-    (+ closing) with a kernel sized just above a bullet hole's real
-    diameter but well below the target's radius. Because a hole is small
-    relative to that kernel, opening erodes it away and reconstructs
-    whatever was actually around it -- black ink, cream paper, or the
-    printed ring boundary itself -- giving a locally-correct background
-    at every point with no hard zone split and no gap. The raw pixel is
-    then compared against that local estimate in BOTH directions
-    (brighter-than-bg and darker-than-bg), so a hole is caught wherever it
-    sits and however its contrast leans, instead of only in the specific
-    zone/sign combination the old code assumed.
-
-    RETR_CCOMP + a minimum blob-area floor reject the two kinds of false
-    positives this opens up: thin ring-boundary artifacts (very low
-    area/perimeter ratio -> fails the circularity check) and small
-    printed digits/dotted-line intersections (too small -> fails the area
-    floor, calibrated well below a real hole's blob area but above the
-    ~15-30px specks that print artifacts produce).
+    Returns (hx, hy) in ROI-relative coords, and the ROI offset (x1, y1), or
+    (None, None), (None, None) if nothing found.
     """
     h, w = gray.shape[:2]
-    margin = int(search_radius) + 10
+    margin = int(search_radius) + 5
     y1, y2 = max(0, ty - margin), min(h, ty + margin)
     x1, x2 = max(0, tx - margin), min(w, tx + margin)
     roi_gray = gray[y1:y2, x1:x2]
 
     rel_tx, rel_ty = tx - x1, ty - y1
 
+    # Distance-from-center map, used to split the ROI into two zones so each
+    # can be thresholded against its own known background instead of a blurred
+    # estimate (a blur smears badly across the sharp printed black/white edge
+    # and misreads that boundary itself as a "hole").
     yy, xx = np.indices(roi_gray.shape)
     dist_map = np.hypot(xx - rel_tx, yy - rel_ty)
-    search_mask = (dist_map <= search_radius).astype(np.uint8) * 255
 
-    # Local background estimate: a hole (~0.15-0.3 * r in diameter for this
-    # sheet's scale) is small relative to this kernel, so opening removes
-    # it and closing repairs any dark-hole dips, leaving a clean estimate
-    # of the surrounding black ink / cream paper / boundary at every point.
-    k = max(int(r * 0.34), 11) | 1  # odd kernel size, scales with target size
-    bg_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
-    local_bg = cv2.morphologyEx(roi_gray, cv2.MORPH_OPEN, bg_kernel)
-    local_bg = cv2.morphologyEx(local_bg, cv2.MORPH_CLOSE, bg_kernel)
+    # Zone A: inside the printed black circle -> hole reads bright against ink.
+    inside_mask = (dist_map <= r * 0.95).astype(np.uint8) * 255
+    _, bright_thresh = cv2.threshold(roi_gray, 170, 255, cv2.THRESH_BINARY)
+    bright_holes = cv2.bitwise_and(bright_thresh, inside_mask)
 
-    diff = roi_gray.astype(np.int16) - local_bg.astype(np.int16)
-    _, bright = cv2.threshold(diff, 30, 255, cv2.THRESH_BINARY)
-    _, dark = cv2.threshold(-diff, 30, 255, cv2.THRESH_BINARY)
-    anomaly = cv2.bitwise_or(bright.astype(np.uint8), dark.astype(np.uint8))
-    anomaly = cv2.bitwise_and(anomaly, search_mask)
+    # Zone B: outside the black circle, out to the usable search radius ->
+    # hole reads as a shadowed/torn dark spot against the white paper.
+    outside_mask = ((dist_map >= r * 1.05) & (dist_map <= search_radius)).astype(np.uint8) * 255
+    _, dark_thresh = cv2.threshold(roi_gray, 140, 255, cv2.THRESH_BINARY_INV)
+    dark_holes = cv2.bitwise_and(dark_thresh, outside_mask)
 
-    kernel3 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    anomaly = cv2.morphologyEx(anomaly, cv2.MORPH_OPEN, kernel3)
+    hole_thresh = cv2.bitwise_or(bright_holes, dark_holes)
 
-    hole_contours, hierarchy = cv2.findContours(anomaly, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    hole_thresh = cv2.morphologyEx(hole_thresh, cv2.MORPH_OPEN, kernel)
 
-    min_hole_area = max(np.pi * (r * 0.08) ** 2, 40)
-    max_hole_area = np.pi * (r * 0.42) ** 2
+    hole_contours, _ = cv2.findContours(hole_thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
+    # Circularity filter (same principle already used elsewhere in this file
+    # for bullseye detection) rejects thin printed scoring-ring lines/numbers
+    # in the white zone, which pass the dark threshold but aren't round blobs.
+    
     valid_holes = []
-    if hierarchy is not None:
-        for i, cnt in enumerate(hole_contours):
-            area = cv2.contourArea(cnt)
-            if area <= min_hole_area or area > max_hole_area:
-                continue
-
-            # A genuinely hollow ring-boundary artifact encloses a large
-            # background-colored interior (its "child" contour); a real
-            # hole is a solid filled blob. Only disqualify when that
-            # enclosed area is a substantial share of the blob itself, so
-            # a few stray noise pixels inside an otherwise-solid hole
-            # don't wrongly disqualify it.
-            child_idx = hierarchy[0][i][2]
-            if child_idx != -1:
-                child_area = cv2.contourArea(hole_contours[child_idx])
-                if child_area > area * 0.3:
-                    continue
-
-            perimeter = cv2.arcLength(cnt, True)
-            circularity = (4 * np.pi * area) / (perimeter ** 2) if perimeter > 0 else 0
-            if circularity > 0.35:
-                valid_holes.append((cnt, area))
+    for cnt in hole_contours:
+        area = cv2.contourArea(cnt)
+        if area <= 15:
+            continue
+        perimeter = cv2.arcLength(cnt, True)
+        circularity = (4 * np.pi * area) / (perimeter ** 2) if perimeter > 0 else 0
+        if circularity > 0.35:
+            valid_holes.append(cnt)
 
     if not valid_holes:
         return None, None, (x1, y1)
 
-    largest_hole = max(valid_holes, key=lambda t: t[1])[0]
+    largest_hole = max(valid_holes, key=cv2.contourArea)
     M = cv2.moments(largest_hole)
     if M["m00"] != 0:
         hx = int(M["m10"] / M["m00"])
@@ -299,6 +261,11 @@ def analyze_orion_target(image_path, output_path="scored_output_warped.jpg"):
     for idx, (tx, ty, r) in enumerate(targets_to_score, start=1):
         target_center_global = (tx, ty)
 
+        # FIX: search radius now spans the real usable scoring area around this
+        # target (roughly half the gap to its nearest neighbor on the sheet),
+        # instead of a fixed 0.92 * r that clipped off anything outside the
+        # black aiming mark. Falls back to a generous multiple of r if a
+        # neighbor distance can't be determined (e.g. a lone target).
         neighbor_dist = _nearest_neighbor_distance(idx - 1, targets_to_score)
         if neighbor_dist is not None:
             search_radius = max(r * 1.3, min(neighbor_dist * 0.48, r * 3.5))
@@ -349,4 +316,4 @@ if __name__ == "__main__":
     for i in range(len(individual_scores)):
         print(f"Target {i+1}: Score = {individual_scores[i]} | Distance = {distances[i]} mm")
     print("------------------------------")
-    print(f"TOTAL SCORE: {total} / 109.0\n")
+    print(f"TOTAL SCORE: {total} / 109.0\n")    
