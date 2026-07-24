@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+
+temp_uploads/
+temp_mobile_input.jpg
+scored_mobile_output.jpg
+scored_output_warped.jpg
+
+image.png
+image2.png
+image3.png
