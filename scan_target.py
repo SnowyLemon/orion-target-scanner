@@ -129,13 +129,13 @@ def find_shot_hole(gray, tx, ty, r, search_radius):
     dist_map = np.hypot(xx - rel_tx, yy - rel_ty)
 
     # Zone A: inside the printed black circle -> hole reads bright against ink.
-    inside_mask = (dist_map <= r * 0.95).astype(np.uint8) * 255
+    inside_mask = (dist_map <= r * 1.05).astype(np.uint8) * 255
     _, bright_thresh = cv2.threshold(roi_gray, 170, 255, cv2.THRESH_BINARY)
     bright_holes = cv2.bitwise_and(bright_thresh, inside_mask)
 
     # Zone B: outside the black circle, out to the usable search radius ->
     # hole reads as a shadowed/torn dark spot against the white paper.
-    outside_mask = ((dist_map >= r * 1.05) & (dist_map <= search_radius)).astype(np.uint8) * 255
+    outside_mask = ((dist_map >= r * 0.95) & (dist_map <= search_radius)).astype(np.uint8) * 255
     _, dark_thresh = cv2.threshold(roi_gray, 140, 255, cv2.THRESH_BINARY_INV)
     dark_holes = cv2.bitwise_and(dark_thresh, outside_mask)
 
@@ -146,10 +146,11 @@ def find_shot_hole(gray, tx, ty, r, search_radius):
 
     hole_contours, _ = cv2.findContours(hole_thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-    # Circularity filter (same principle already used elsewhere in this file
-    # for bullseye detection) rejects thin printed scoring-ring lines/numbers
-    # in the white zone, which pass the dark threshold but aren't round blobs.
-
+    # Reject implausibly large blobs (e.g. the printed black circle's own
+    # edge ring getting misclassified as "dark against outside" when the
+    # zones overlap near the true boundary). A real pellet hole is a small
+    # fraction of the aiming-mark radius (~4.5mm hole vs ~30.5mm mark), so
+    # anything close to the full circle's area is not a shot.
     max_hole_area = np.pi * (r * 0.35) ** 2
 
     valid_holes = []
