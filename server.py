@@ -117,6 +117,10 @@ def index():
 def manifest():
     return FileResponse("manifest.json", media_type="application/manifest+json")
 
+@app.get("/ping")
+def ping():
+    return {"status": "awake"}
+
 @app.post("/scan")
 async def scan_target_endpoint(file: UploadFile = File(...)):
     """Receives image from mobile device, processes via OpenCV, returns JSON + preview."""
