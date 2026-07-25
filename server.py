@@ -131,9 +131,7 @@ async def scan_target_endpoint(file: UploadFile = File(...)):
         with open(temp_filename, "wb") as f:
             f.write(contents)
         
-        # Run computer vision pipeline. The returned image is now the
-        # filtered/normalized scan itself, with scoring drawn directly on it
-        # (see scan_target.py) - not the original color photo.
+        # Run computer vision pipeline
         output_filename = "scored_mobile_output.jpg"
         scores, distances, total_score = analyze_orion_target(temp_filename, output_filename)
         
