@@ -66,6 +66,40 @@ def _nearest_neighbor_distance(idx, targets):
 
 
 def find_shot_hole(gray, tx, ty, r, search_radius, debug_tag=None):
+    """
+    Locates the bullet hole near a target center using radial-median
+    background subtraction.
+
+    Why this replaces the old "inside black circle -> bright test" /
+    "outside on white paper -> dark test" zone split: that split left an
+    unclassified ring of pixels right at the printed-circle boundary
+    (roughly 0.95r-1.05r), and any hole straddling that boundary got
+    half-judged by each test -- so neither half alone passed the
+    area/circularity filter and the hole was missed entirely (scored 0.0).
+    Even when a hole WAS detected, if only part of it fell within the
+    "correct" zone, the centroid was computed from that partial blob only,
+    dragging the reported center toward the edge of the true hole instead
+    of its middle -- the "overshoots to the edge" symptom.
+
+    A generic local-contrast method (e.g. top-hat/black-hat) was tried and
+    rejected: because the target face is covered in real printed features
+    (the outer black/white boundary, concentric dotted scoring rings), any
+    method that flags "locally different from neighboring pixels" fires on
+    those printed edges too, not just on holes -- it can't tell a printed
+    ring from a punched hole.
+
+    Radial-median subtraction fixes this by using the fact that the target
+    face is radially symmetric: at any given radius from the bullseye
+    center, the printed pattern (ink or paper, ring or gap) is the same at
+    every angle. So for each radius we compute the *median* brightness over
+    all angles at that radius -- this is robust to a single localized hole
+    (a minority of angles) while representing the true printed background.
+    Subtracting that expected-value-at-this-radius from the actual pixel
+    isolates only things that break radial symmetry: the hole. This
+    correctly ignores the boundary and the printed rings (which match their
+    own radius's expected value almost everywhere) while still lighting up
+    a hole wherever it sits, including squarely on the boundary itself.
+    """
     h, w = gray.shape[:2]
     margin = int(search_radius) + 5
     y1, y2 = max(0, ty - margin), min(h, ty + margin)
@@ -107,6 +141,10 @@ def find_shot_hole(gray, tx, ty, r, search_radius, debug_tag=None):
     close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
     open_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
 
+    # Expected real-hole size, from the known pellet caliber (4.5mm) and
+    # this target's mm-per-pixel scale, used to sanity-check candidates so
+    # we don't accept an implausibly huge or tiny blob (e.g. print smudges,
+    # or a fleck of noise).
     mm_per_px_est = 30.5 / (r * 2)
     expected_hole_area = np.pi * ((4.5 / 2) / mm_per_px_est) ** 2
     max_allowed_area = expected_hole_area * 6.0
@@ -124,21 +162,13 @@ def find_shot_hole(gray, tx, ty, r, search_radius, debug_tag=None):
             perimeter = cv2.arcLength(cnt, True)
             circularity = (4 * np.pi * area) / (perimeter ** 2) if perimeter > 0 else 0
             if circularity > 0.25:
-                # Calculate distance to target center for proximity sorting
-                M = cv2.moments(cnt)
-                if M["m00"] != 0:
-                    cx = M["m10"] / M["m00"]
-                    cy = M["m01"] / M["m00"]
-                else:
-                    cx, cy = float(cnt[0][0][0]), float(cnt[0][0][1])
-                
-                dist_to_center = np.hypot(cx - rel_tx, cy - rel_ty)
-                
-                # Append dist_to_center as the 4th element in the tuple
-                found.append((cnt, area, circularity, dist_to_center))
+                found.append((cnt, area, circularity))
         return found, mask_u8
 
-    # Adaptive percentile threshold
+    # Adaptive percentile threshold: start strict (isolates only the
+    # strongest anomaly) and relax progressively if nothing plausible is
+    # found, so faint/partial holes are still recovered without letting
+    # ordinary print noise through at the strict end.
     best_candidates, best_mask = [], None
     for pct in [98, 96, 93, 90, 87, 84]:
         thresh_val = max(20.0, float(np.percentile(vals, pct)))
@@ -158,14 +188,12 @@ def find_shot_hole(gray, tx, ty, r, search_radius, debug_tag=None):
     if not best_candidates:
         return None, None, (x1, y1)
 
-    # Get the top 3 largest candidates that passed the size and circularity filters.
+    # Prefer the most circular candidate among the largest few -- a real
+    # hole is round; leftover printed-number/ring fragments that slip
+    # through the area filter tend to be more irregular.
     best_candidates.sort(key=lambda t: t[1], reverse=True)
     top = best_candidates[:3]
-
-    # The true bullet hole will always be closer to the target center 
-    # than printed text (like '9' or '6') in the margins. 
-    # Pick the candidate with the minimum distance to center (index 3).
-    largest_hole = min(top, key=lambda t: t[3])[0]
+    largest_hole = max(top, key=lambda t: t[2])[0]
 
     M = cv2.moments(largest_hole)
     if M["m00"] != 0:
