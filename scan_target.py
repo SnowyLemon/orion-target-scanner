@@ -1,67 +1,22 @@
 import cv2
 import numpy as np
-from skimage.filters import threshold_local
-from skimage.exposure import rescale_intensity
-
-def enhance_target_sheet(image):
-    """
-    CamScanner-style enhancement of the flattened target sheet.
-
-    The goal (per the "Magic AI Pro" vibe) is a crisp high-contrast black &
-    white scan: uneven lighting from a phone photo is flattened with a LOCAL
-    Otsu threshold, so the printed black aiming marks / scoring rings and the
-    shot holes read as near-pure black against a near-pure white paper
-    background regardless of where the light fell on the sheet.
-
-    Returns a uint8 single-channel (grayscale) image. Callers that need a BGR
-    image for drawing (OpenCV overlay text/lines) should wrap the result with
-    cv2.cvtColor(..., cv2.COLOR_GRAY2BGR).
-    """
-    # Work on a grayscale copy so the filter is purely intensity-based.
-    if image.ndim == 3:
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    else:
-        gray = image
-
-    # Stretch the dynamic range first so the adaptive threshold operates on
-    # the full 0-255 span (handy when a photo is washed out / low contrast).
-    gray = rescale_intensity(gray, out_range=(0, 255)).astype(np.uint8)
-
-    # Local Otsu: compute a threshold per block instead of one global cut.
-    # Block size MUST be odd and >= the largest printed feature we want to
-    # preserve as solid black (the aiming marks); 31px comfortably covers the
-    # rings on a 1000x1300 flattened sheet while still adapting to shadows.
-    block_size = 31
-    local_thresh = threshold_local(gray, block_size, offset=10, method="gaussian")
-
-    # threshold_local returns a per-pixel threshold array; pixels darker than
-    # their local threshold become black (ink), the rest become white (paper).
-    binary = (gray > local_thresh).astype(np.uint8) * 255
-
-    # Light morphological cleanup: knock out single-pixel pepper/noise specks
-    # without eroding the real shot holes (which are several px across).
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
-    binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
-
-    return binary
 
 def order_points(pts):
     """
     Orders 4 coordinates in sequence: top-left, top-right, bottom-right, bottom-left.
     """
     rect = np.zeros((4, 2), dtype="float32")
-    
+
     # Top-left has smallest sum, bottom-right has largest sum
     s = pts.sum(axis=1)
     rect[0] = pts[np.argmin(s)]
     rect[2] = pts[np.argmax(s)]
-    
+
     # Top-right has smallest difference, bottom-left has largest difference
     diff = np.diff(pts, axis=1)
     rect[1] = pts[np.argmin(diff)]
     rect[3] = pts[np.argmax(diff)]
-    
+
     return rect
 
 def four_point_transform(image, pts, target_width=1000, target_height=1300):
@@ -69,7 +24,7 @@ def four_point_transform(image, pts, target_width=1000, target_height=1300):
     Warps and flattens a quadrilateral region in an image into a clean top-down view.
     """
     rect = order_points(pts)
-    
+
     # Destination coordinates for uniform sheet resolution
     dst = np.array([
         [0, 0],
@@ -80,7 +35,7 @@ def four_point_transform(image, pts, target_width=1000, target_height=1300):
     # Perspective Transformation Matrix
     M = cv2.getPerspectiveTransform(rect, dst)
     warped = cv2.warpPerspective(image, M, (target_width, target_height))
-    
+
     return warped
 
 def auto_flatten_target_sheet(image):
@@ -89,19 +44,19 @@ def auto_flatten_target_sheet(image):
     """
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-    
+
     # Edge detection
     edged = cv2.Canny(blurred, 50, 150)
-    
+
     # Find contours representing paper sheet
     contours, _ = cv2.findContours(edged, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     contours = sorted(contours, key=cv2.contourArea, reverse=True)
-    
+
     sheet_contour = None
     for cnt in contours:
         perimeter = cv2.arcLength(cnt, True)
         approx = cv2.approxPolyDP(cnt, 0.02 * perimeter, True)
-        
+
         # Look for the largest 4-sided polygon
         if len(approx) == 4 and cv2.contourArea(cnt) > (image.shape[0] * image.shape[1] * 0.2):
             sheet_contour = approx
@@ -114,6 +69,71 @@ def auto_flatten_target_sheet(image):
         # Fallback if paper borders aren't distinct (e.g. tight crop or dark background)
         print("[INFO] Outer paper border not detected with high confidence. Using raw image.")
         return cv2.resize(image, (1000, 1300))
+
+
+def preprocess_for_grading(image):
+    """
+    Pre-grading filter pipeline. Runs automatically on every scan (always-on) to
+    make detection/scoring more precise by cleaning up the kinds of problems that
+    hurt target grading on phone photos:
+
+      - uneven lighting / shadows across the sheet
+      - low contrast between the printed black ink and paper (dull photos)
+      - paper-grain / sensor noise that gets misread as small shot holes
+      - faint scoring-ring lines that blur into hole candidates
+
+    Returns:
+        working_bgr   - the filtered image in BGR, used to draw the annotated
+                        preview (so the returned preview shows exactly what the
+                        engine saw -- "graded on filtered image").
+        working_gray  - the filtered grayscale image, fed into bullseye/sighter
+                        detection and find_shot_hole().
+        binary_clean  - a cleaned adaptive-threshold binary image, available for
+                        any detection step that wants a hard black/white mask.
+    """
+    # 1) Grayscale baseline
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+    # 2) Even out uneven lighting so one side of the sheet (often shadowed on a
+    #    phone shot) isn't graded differently from the other. Background is the
+    #    large-scale illumination; subtracting it flattens shadows.
+    bg = cv2.GaussianBlur(gray, (81, 81), 0)
+    norm = cv2.subtract(gray, bg)
+    # Stretch back to full 0..255 range so printed marks stay crisp.
+    norm = cv2.normalize(norm, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+
+    # 3) Local contrast boost (CLAHE). CLAHE adapts to local regions, so it
+    #    lifts low-contrast holes without blowing out the already-dark bullseyes.
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    contrast = clahe.apply(norm)
+
+    # 4) Edge-preserving denoise. Bilateral filter removes paper-grain / sensor
+    #    speckle (the main thing that gets misread as tiny shot holes) WITHOUT
+    #    smearing the sharp edges of the bullet holes and printed rings the way a
+    #    plain Gaussian blur would.
+    denoised = cv2.bilateralFilter(contrast, d=5, sigmaColor=35, sigmaSpace=35)
+
+    # 5) Sharpen to recover hole edges slightly softened by denoise.
+    kernel_sharpen = np.array([[0, -1, 0],
+                               [-1, 5, -1],
+                               [0, -1, 0]], dtype=np.float32)
+    working_gray = cv2.filter2D(denoised, -1, kernel_sharpen)
+
+    # 6) Clean adaptive-threshold binary for any step that wants a hard mask.
+    #    ADAPTIVE_THRESH_GAUSSIAN_C handles whatever local lighting remains.
+    binary_clean = cv2.adaptiveThreshold(
+        working_gray, 255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV,
+        blockSize=25, C=5)
+    # Remove tiny specks (paper grain).
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    binary_clean = cv2.morphologyEx(binary_clean, cv2.MORPH_OPEN, k)
+
+    # Annotated preview is drawn on a 3-channel version of the filtered gray.
+    working_bgr = cv2.cvtColor(working_gray, cv2.COLOR_GRAY2BGR)
+
+    return working_bgr, working_gray, binary_clean
+
 
 def draw_dotted_line(img, pt1, pt2, color=(0, 255, 255), gap=5):
     """Draws a dotted line between two point tuples (x, y)."""
@@ -155,6 +175,10 @@ def find_shot_hole(gray, tx, ty, r, search_radius):
       reads as a shadowed/torn dark blob. The old single-direction bright
       threshold only ever matched the first case.
 
+    `gray` is the FILTERED grayscale from preprocess_for_grading(), so the
+    thresholds below operate on a clean, normalized image rather than the raw
+    photo.
+
     Returns (hx, hy) in ROI-relative coords, and the ROI offset (x1, y1), or
     (None, None), (None, None) if nothing found.
     """
@@ -194,7 +218,7 @@ def find_shot_hole(gray, tx, ty, r, search_radius):
     # Circularity filter (same principle already used elsewhere in this file
     # for bullseye detection) rejects thin printed scoring-ring lines/numbers
     # in the white zone, which pass the dark threshold but aren't round blobs.
-    
+
     valid_holes = []
     for cnt in hole_contours:
         area = cv2.contourArea(cnt)
@@ -226,20 +250,17 @@ def analyze_orion_target(image_path, output_path="scored_output_warped.jpg"):
     # 1. AUTO-PERSPECTIVE CORRECTION (Un-skew and flatten photo)
     img = auto_flatten_target_sheet(raw_img)
 
-    # 1b. SCIKIT-IMAGE ENHANCEMENT — CamScanner-style high-contrast B&W.
-    # The flattened sheet is run through a local Otsu threshold so the printed
-    # marks and shot holes are near-pure black on white regardless of lighting,
-    # which makes downstream bullseye / shot-hole detection more accurate. `gray`
-    # (the filtered image) drives ALL detection below; `img` is rebuilt from it
-    # as a BGR canvas so the final scored preview also reads as crisp B&W.
-    gray = enhance_target_sheet(img)
+    # 1b. PRE-GRADING FILTER PIPELINE (always on, automatic)
+    # Produces a clean, normalized image for detection + the annotated preview.
+    working_bgr, gray, binary_clean = preprocess_for_grading(img)
+    img = working_bgr  # annotations will be drawn on the filtered image
+
     h, w = gray.shape[:2]
-    img = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
 
     # 2. Locate central sighter box (SS targets)
     _, thresh = cv2.threshold(gray, 100, 255, cv2.THRESH_BINARY_INV)
     contours, _ = cv2.findContours(thresh, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-    
+
     sighter_box = None
     for cnt in contours:
         x, y, bw, bh = cv2.boundingRect(cnt)
@@ -254,9 +275,9 @@ def analyze_orion_target(image_path, output_path="scored_output_warped.jpg"):
     _, dark_thresh = cv2.threshold(gray, 80, 255, cv2.THRESH_BINARY_INV)
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
     dark_thresh = cv2.morphologyEx(dark_thresh, cv2.MORPH_OPEN, kernel)
-    
+
     bull_contours, _ = cv2.findContours(dark_thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    
+
     detected_targets = []
     for cnt in bull_contours:
         area = cv2.contourArea(cnt)
@@ -268,7 +289,7 @@ def analyze_orion_target(image_path, output_path="scored_output_warped.jpg"):
             else:
                 (cx, cy), _ = cv2.minEnclosingCircle(cnt)
                 cx, cy = int(cx), int(cy)
-                
+
             _, radius = cv2.minEnclosingCircle(cnt)
             circularity = (4 * np.pi * area) / (cv2.arcLength(cnt, True) ** 2) if cv2.arcLength(cnt, True) > 0 else 0
             if circularity > 0.5:
@@ -289,7 +310,7 @@ def analyze_orion_target(image_path, output_path="scored_output_warped.jpg"):
 
     # 5. Sort 10 perimeter targets sequentially (1 through 10)
     record_targets = sorted(record_targets, key=lambda t: t[1])
-    
+
     rows = []
     current_row = [record_targets[0]]
     for t in record_targets[1:]:
@@ -299,7 +320,7 @@ def analyze_orion_target(image_path, output_path="scored_output_warped.jpg"):
             rows.append(current_row)
             current_row = [t]
     rows.append(current_row)
-    
+
     ordered_targets = []
     for row in rows:
         sorted_row = sorted(row, key=lambda t: t[0])
@@ -330,43 +351,43 @@ def analyze_orion_target(image_path, output_path="scored_output_warped.jpg"):
         if hx is not None:
             shot_center_global = (x1 + hx, y1 + hy)
             dist_px = np.sqrt((hx - (tx - x1))**2 + (hy - (ty - y1))**2)
-            
+
             # Scale calculation: 30.5mm = black aiming mark diameter
             mm_per_px = 30.5 / (r * 2)
             dist_mm = dist_px * mm_per_px
-            
+
             # ISSF Decimal Score formula
             score = 10.9 - (dist_mm * 0.4)
             score = round(max(0.0, min(10.9, score)), 1)
-            
+
             # Visual overlay
             draw_dotted_line(img, target_center_global, shot_center_global, color=(0, 255, 255), gap=4)
             cv2.circle(img, target_center_global, 3, (255, 255, 0), -1)
             cv2.circle(img, shot_center_global, 4, (0, 0, 255), -1)
-            
+
             label_text = f"#{idx}: {score} ({dist_mm:.2f}mm)"
         else:
             score = 0.0
             dist_mm = 0.0
             label_text = f"#{idx}: {score}"
-            
+
         scores.append(score)
         distances_mm.append(round(dist_mm, 2))
-        
+
         cv2.putText(img, label_text, (tx - r - 10, ty - r - 8),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
         cv2.circle(img, (tx, ty), r, (255, 0, 0), 2)
 
     total_score = round(sum(scores), 1)
-    
+
     cv2.imwrite(output_path, img)
     return scores, distances_mm, total_score
 
 if __name__ == "__main__":
     individual_scores, distances, total = analyze_orion_target("image2.png")
-    
+
     print("\n--- TARGET SCORING RESULTS ---")
     for i in range(len(individual_scores)):
         print(f"Target {i+1}: Score = {individual_scores[i]} | Distance = {distances[i]} mm")
     print("------------------------------")
-    print(f"TOTAL SCORE: {total} / 109.0\n")    
+    print(f"TOTAL SCORE: {total} / 109.0\n")
