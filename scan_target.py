@@ -369,10 +369,15 @@ def analyze_orion_target(image_path, output_path="scored_output_warped.jpg", deb
     total_score = round(sum(scores), 1)
     
     cv2.imwrite(output_path, img)
-    return scores, distances_mm, total_score
+
+    # NEW: return the normalized/filtered grayscale image too (the same thing
+    # debug=True saves to disk), so a caller (e.g. the web server) can show it
+    # to the user alongside the scored overlay - this is the "filtered version"
+    # of the photo, same idea as the test(2) example.
+    return scores, distances_mm, total_score, gray
 
 if __name__ == "__main__":
-    individual_scores, distances, total = analyze_orion_target("image2.png", debug=True)
+    individual_scores, distances, total, filtered_img = analyze_orion_target("image2.png", debug=True)
     
     print("\n--- TARGET SCORING RESULTS ---")
     for i in range(len(individual_scores)):

@@ -43,6 +43,7 @@ HTML_CONTENT = """
         img { width: 100%; border-radius: 8px; margin-top: 15px; }
         .score-row { display: flex; justify-content: space-between; border-bottom: 1px solid #eee; padding: 8px 0; }
         .total { font-size: 20px; font-weight: bold; color: #2c3e50; margin-top: 15px; text-align: center; }
+        .image-label { font-size: 13px; color: #666; margin-top: 12px; text-align: center; text-transform: uppercase; letter-spacing: 0.05em; }
     </style>
 </head>
 <body>
@@ -60,6 +61,12 @@ HTML_CONTENT = """
         
         <div id="results"></div>
         <img id="scoredImage" style="display:none;" />
+
+        <!-- NEW: shows the normalized/filtered image the detector actually
+             scored against, so you can see why a target did or didn't get
+             picked up (lighting, glare, etc.) -->
+        <div id="filteredLabel" class="image-label" style="display:none;">Filtered scan (what the detector saw)</div>
+        <img id="filteredImage" style="display:none;" />
     </div>
 
     <script>
@@ -70,6 +77,8 @@ HTML_CONTENT = """
             document.getElementById('loading').style.display = 'block';
             document.getElementById('results').innerHTML = '';
             document.getElementById('scoredImage').style.display = 'none';
+            document.getElementById('filteredImage').style.display = 'none';
+            document.getElementById('filteredLabel').style.display = 'none';
 
             const formData = new FormData();
             formData.append('file', input.files[0]);
@@ -96,6 +105,14 @@ HTML_CONTENT = """
                 const img = document.getElementById('scoredImage');
                 img.src = 'data:image/jpeg;base64,' + data.image_base64;
                 img.style.display = 'block';
+
+                // NEW: render the filtered/normalized image if the server sent one
+                if (data.filtered_image_base64) {
+                    const filteredImg = document.getElementById('filteredImage');
+                    filteredImg.src = 'data:image/jpeg;base64,' + data.filtered_image_base64;
+                    filteredImg.style.display = 'block';
+                    document.getElementById('filteredLabel').style.display = 'block';
+                }
 
             } catch (err) {
                 document.getElementById('loading').style.display = 'none';
@@ -133,17 +150,23 @@ async def scan_target_endpoint(file: UploadFile = File(...)):
         
         # Run computer vision pipeline
         output_filename = "scored_mobile_output.jpg"
-        scores, distances, total_score = analyze_orion_target(temp_filename, output_filename)
+        scores, distances, total_score, filtered_img = analyze_orion_target(temp_filename, output_filename)
         
         # Read annotated image and convert to Base64 to show on phone screen
         with open(output_filename, "rb") as f:
             encoded_img = base64.b64encode(f.read()).decode('utf-8')
-            
+
+        # NEW: encode the filtered/normalized image straight from memory
+        # (no need to round-trip through disk like the scored overlay above)
+        success, filtered_buffer = cv2.imencode('.jpg', filtered_img)
+        encoded_filtered_img = base64.b64encode(filtered_buffer).decode('utf-8') if success else None
+
         return {
             "scores": scores,
             "distances": distances,
             "total_score": total_score,
-            "image_base64": encoded_img
+            "image_base64": encoded_img,
+            "filtered_image_base64": encoded_filtered_img
         }
     except Exception as e:
         return {"error": str(e)}
