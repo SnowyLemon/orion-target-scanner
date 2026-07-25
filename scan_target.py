@@ -98,20 +98,18 @@ def find_shot_hole(gray, tx, ty, r, search_radius):
     """
     Locates the bullet hole near a target center.
 
-    FIX (bug report: holes outside the black aiming mark were never detected):
-    - `search_radius` now covers the full usable scoring area around the target
-      (computed by the caller from the sheet's actual target spacing) instead of
-      a fixed 0.92 * r, which previously discarded anything past the edge of the
-      black circle before contours were even found.
-    - Holes are now flagged as blobs that are either BRIGHTER or DARKER than
-      their immediate local background (via a blurred local-background estimate),
-      instead of only "brighter than 170". A hole punched through black ink
-      exposes lighter backing (bright blob); a hole in the white paper area
-      reads as a shadowed/torn dark blob. The old single-direction bright
-      threshold only ever matched the first case.
-
-    Returns (hx, hy) in ROI-relative coords, and the ROI offset (x1, y1), or
-    (None, None), (None, None) if nothing found.
+    Uses morphological top-hat/black-hat blob detection instead of a hard
+    inside-the-black-circle vs outside-on-white-paper split. Top-hat finds
+    blobs brighter than their own local neighborhood; black-hat finds blobs
+    darker than their own local neighborhood. Both are LOCAL operations (the
+    neighborhood is a disk sized to one pellet hole), so a hole is picked up
+    the same way whether it's punched through the black ink, sitting on the
+    white paper, or - critically - straddling the printed edge between the
+    two. That straddling case is what the old inside/outside split missed:
+    a hole centered on the boundary got sliced in half by that hard line,
+    each half judged only by the rule for its own side, and neither half was
+    big/round enough alone to pass the area+circularity filter, so the shot
+    silently scored 0.
     """
     h, w = gray.shape[:2]
     margin = int(search_radius) + 5
@@ -121,60 +119,64 @@ def find_shot_hole(gray, tx, ty, r, search_radius):
 
     rel_tx, rel_ty = tx - x1, ty - y1
 
-    # Distance-from-center map, used to split the ROI into two zones so each
-    # can be thresholded against its own known background instead of a blurred
-    # estimate (a blur smears badly across the sharp printed black/white edge
-    # and misreads that boundary itself as a "hole").
     yy, xx = np.indices(roi_gray.shape)
     dist_map = np.hypot(xx - rel_tx, yy - rel_ty)
+    valid_mask = (dist_map <= search_radius).astype(np.uint8)
 
-    # Zone A: inside the printed black circle -> hole reads bright against ink.
-    inside_mask = (dist_map <= r).astype(np.uint8) * 255
-    outside_mask = ((dist_map > r) & (dist_map <= search_radius)).astype(np.uint8) * 255
+    # Expected pellet-hole size in THIS image's pixel scale, derived from the
+    # same 30.5mm aiming-mark reference already used for scoring below (a
+    # 4.5mm pellet against a 30.5mm black aiming mark). Sizes both the
+    # top-hat/black-hat neighborhood and the plausible-hole-size filter below.
+    expected_hole_radius_px = max(2.0, r * (4.5 / 30.5))
+    ksize = int(expected_hole_radius_px * 2.4) | 1  # odd, a bit over one hole-diameter
+    hat_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ksize, ksize))
 
-    # ADAPTIVE THRESHOLD instead of fixed magic numbers (170 / 140).
-    # A hole's brightest pixels can land anywhere from ~250 (fully punched,
-    # well lit) down to ~150 (grazed, shadowed, dim phone lighting) - still
-    # clearly brighter than the surrounding ink (~20-40), just not brighter
-    # than a universal "170". Otsu finds the split point that best separates
-    # ink from hole *for this target's own pixels*, so it adapts per-shot.
-    inside_pixels = roi_gray[inside_mask > 0]
-    if inside_pixels.size > 0:
-        bright_cut, _ = cv2.threshold(inside_pixels.reshape(-1, 1), 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        bright_cut = float(np.clip(bright_cut, 90, 180))
-    else:
-        bright_cut = 170
-    _, bright_thresh = cv2.threshold(roi_gray, bright_cut, 255, cv2.THRESH_BINARY)
-    bright_holes = cv2.bitwise_and(bright_thresh, inside_mask)
+    blurred = cv2.GaussianBlur(roi_gray, (3, 3), 0)
+    tophat = cv2.morphologyEx(blurred, cv2.MORPH_TOPHAT, hat_kernel)
+    blackhat = cv2.morphologyEx(blurred, cv2.MORPH_BLACKHAT, hat_kernel)
+    combined = cv2.max(tophat, blackhat)
+    combined = cv2.bitwise_and(combined, combined, mask=valid_mask)
 
-    outside_pixels = roi_gray[outside_mask > 0]
-    if outside_pixels.size > 0:
-        dark_cut, _ = cv2.threshold(outside_pixels.reshape(-1, 1), 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        dark_cut = float(np.clip(dark_cut, 100, 170))
-    else:
-        dark_cut = 140
-    _, dark_thresh = cv2.threshold(roi_gray, dark_cut, 255, cv2.THRESH_BINARY_INV)
-    dark_holes = cv2.bitwise_and(dark_thresh, outside_mask)
+    # Adaptive cut: only the small tail of pixels that stand out well above
+    # this target's own local-contrast noise floor (printed dotted rings,
+    # JPEG noise, faint antialiasing along the boundary all sit near the
+    # 97th-99th percentile) counts as hole-candidate signal. Percentile-based
+    # rather than a fixed constant so it adapts to each photo's lighting/
+    # contrast instead of assuming one fixed brightness gap.
+    valid_vals = combined[dist_map <= search_radius]
+    noise_floor = float(np.percentile(valid_vals, 99)) if valid_vals.size > 0 else 40.0
+    cut = max(35.0, noise_floor + 7.0)
 
-    hole_thresh = cv2.bitwise_or(bright_holes, dark_holes)
+    _, hole_thresh = cv2.threshold(combined, cut, 255, cv2.THRESH_BINARY)
 
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    hole_thresh = cv2.morphologyEx(hole_thresh, cv2.MORPH_OPEN, kernel)
+    # Close to reconnect a hole whose two sides (bright-on-ink / dark-on-
+    # paper) got picked up as separate nearby blobs by top-hat vs black-hat.
+    close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    hole_thresh = cv2.morphologyEx(hole_thresh, cv2.MORPH_CLOSE, close_kernel)
 
     hole_contours, _ = cv2.findContours(hole_thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-    # Circularity filter (same principle already used elsewhere in this file
-    # for bullseye detection) rejects thin printed scoring-ring lines/numbers
-    # in the white zone, which pass the dark threshold but aren't round blobs.
-    
+    # FIX (printed dotted scoring-ring speckles on outer targets): those
+    # targets print faint dotted scoring-ring circles that extend past the
+    # black aiming mark onto the white paper, plus the boundary's own
+    # antialiasing can trace thin arcs. Both trip top-hat/black-hat, but
+    # neither matches a real pellet hole's size+shape: dots are much smaller,
+    # and boundary arcs are long thin curves (very low circularity). Bound
+    # accepted contours to the expected hole size and require a roughly round
+    # shape, which rejects both without a heavier pass that risks erasing
+    # grazed/partial real holes too.
+    expected_hole_area = np.pi * (expected_hole_radius_px ** 2)
+    min_area = max(15, expected_hole_area * 0.2)
+    max_area = expected_hole_area * 6
+
     valid_holes = []
     for cnt in hole_contours:
         area = cv2.contourArea(cnt)
-        if area <= 15:
+        if area <= min_area or area > max_area:
             continue
         perimeter = cv2.arcLength(cnt, True)
         circularity = (4 * np.pi * area) / (perimeter ** 2) if perimeter > 0 else 0
-        if circularity > 0.35:
+        if circularity > 0.27:
             valid_holes.append(cnt)
 
     if not valid_holes:
@@ -278,11 +280,6 @@ def analyze_orion_target(image_path, output_path="scored_output_warped.jpg"):
     for idx, (tx, ty, r) in enumerate(targets_to_score, start=1):
         target_center_global = (tx, ty)
 
-        # FIX: search radius now spans the real usable scoring area around this
-        # target (roughly half the gap to its nearest neighbor on the sheet),
-        # instead of a fixed 0.92 * r that clipped off anything outside the
-        # black aiming mark. Falls back to a generous multiple of r if a
-        # neighbor distance can't be determined (e.g. a lone target).
         neighbor_dist = _nearest_neighbor_distance(idx - 1, targets_to_score)
         if neighbor_dist is not None:
             search_radius = max(r * 1.3, min(neighbor_dist * 0.48, r * 3.5))
@@ -333,4 +330,4 @@ if __name__ == "__main__":
     for i in range(len(individual_scores)):
         print(f"Target {i+1}: Score = {individual_scores[i]} | Distance = {distances[i]} mm")
     print("------------------------------")
-    print(f"TOTAL SCORE: {total} / 109.0\n")    
+    print(f"TOTAL SCORE: {total} / 109.0\n")
