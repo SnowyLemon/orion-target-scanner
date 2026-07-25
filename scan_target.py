@@ -64,42 +64,7 @@ def _nearest_neighbor_distance(idx, targets):
             best = d
     return best
 
-
-def find_shot_hole(gray, tx, ty, r, search_radius, debug_tag=None):
-    """
-    Locates the bullet hole near a target center using radial-median
-    background subtraction.
-
-    Why this replaces the old "inside black circle -> bright test" /
-    "outside on white paper -> dark test" zone split: that split left an
-    unclassified ring of pixels right at the printed-circle boundary
-    (roughly 0.95r-1.05r), and any hole straddling that boundary got
-    half-judged by each test -- so neither half alone passed the
-    area/circularity filter and the hole was missed entirely (scored 0.0).
-    Even when a hole WAS detected, if only part of it fell within the
-    "correct" zone, the centroid was computed from that partial blob only,
-    dragging the reported center toward the edge of the true hole instead
-    of its middle -- the "overshoots to the edge" symptom.
-
-    A generic local-contrast method (e.g. top-hat/black-hat) was tried and
-    rejected: because the target face is covered in real printed features
-    (the outer black/white boundary, concentric dotted scoring rings), any
-    method that flags "locally different from neighboring pixels" fires on
-    those printed edges too, not just on holes -- it can't tell a printed
-    ring from a punched hole.
-
-    Radial-median subtraction fixes this by using the fact that the target
-    face is radially symmetric: at any given radius from the bullseye
-    center, the printed pattern (ink or paper, ring or gap) is the same at
-    every angle. So for each radius we compute the *median* brightness over
-    all angles at that radius -- this is robust to a single localized hole
-    (a minority of angles) while representing the true printed background.
-    Subtracting that expected-value-at-this-radius from the actual pixel
-    isolates only things that break radial symmetry: the hole. This
-    correctly ignores the boundary and the printed rings (which match their
-    own radius's expected value almost everywhere) while still lighting up
-    a hole wherever it sits, including squarely on the boundary itself.
-    """
+def find_shot_hole(gray, tx, ty, r, search_radius, use_shift=True, debug_tag=None):
     h, w = gray.shape[:2]
     margin = int(search_radius) + 5
     y1, y2 = max(0, ty - margin), min(h, ty + margin)
@@ -123,15 +88,18 @@ def find_shot_hole(gray, tx, ty, r, search_radius, debug_tag=None):
         if ring.any():
             expected[rad] = np.median(roi[ring])
             
-    # Calculate deviation against a small neighborhood of radii (+/- 2 pixels).
-    # This completely eliminates boundary crescent artifacts caused by slight 
-    # center misalignments or warped paper, isolating the true hole.
-    devs = []
-    for offset in [-2, -1, 0, 1, 2]:
-        shifted_expected = expected[np.clip(r_int + offset, 0, max_r)]
-        devs.append(np.abs(roi - shifted_expected))
+    # The toggle for the fallback method. 
+    # use_shift=True is the original behavior. 
+    # use_shift=False isolates the true hole on the border without erasing it.
+    if use_shift:
+        devs = []
+        for offset in [-2, -1, 0, 1, 2]:
+            shifted_expected = expected[np.clip(r_int + offset, 0, max_r)]
+            devs.append(np.abs(roi - shifted_expected))
+        deviation = np.minimum.reduce(devs)
+    else:
+        deviation = np.abs(roi - expected[np.clip(r_int, 0, max_r)])
         
-    deviation = np.minimum.reduce(devs)
     deviation[~search_mask] = 0
 
     vals = deviation[search_mask]
@@ -141,10 +109,6 @@ def find_shot_hole(gray, tx, ty, r, search_radius, debug_tag=None):
     close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
     open_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
 
-    # Expected real-hole size, from the known pellet caliber (4.5mm) and
-    # this target's mm-per-pixel scale, used to sanity-check candidates so
-    # we don't accept an implausibly huge or tiny blob (e.g. print smudges,
-    # or a fleck of noise).
     mm_per_px_est = 30.5 / (r * 2)
     expected_hole_area = np.pi * ((4.5 / 2) / mm_per_px_est) ** 2
     max_allowed_area = expected_hole_area * 6.0
@@ -165,10 +129,6 @@ def find_shot_hole(gray, tx, ty, r, search_radius, debug_tag=None):
                 found.append((cnt, area, circularity))
         return found, mask_u8
 
-    # Adaptive percentile threshold: start strict (isolates only the
-    # strongest anomaly) and relax progressively if nothing plausible is
-    # found, so faint/partial holes are still recovered without letting
-    # ordinary print noise through at the strict end.
     best_candidates, best_mask = [], None
     for pct in [98, 96, 93, 90, 87, 84]:
         thresh_val = max(20.0, float(np.percentile(vals, pct)))
@@ -188,9 +148,6 @@ def find_shot_hole(gray, tx, ty, r, search_radius, debug_tag=None):
     if not best_candidates:
         return None, None, (x1, y1)
 
-    # Prefer the most circular candidate among the largest few -- a real
-    # hole is round; leftover printed-number/ring fragments that slip
-    # through the area filter tend to be more irregular.
     best_candidates.sort(key=lambda t: t[1], reverse=True)
     top = best_candidates[:3]
     largest_hole = max(top, key=lambda t: t[2])[0]
@@ -203,7 +160,6 @@ def find_shot_hole(gray, tx, ty, r, search_radius, debug_tag=None):
         hx, hy = rel_tx, rel_ty
 
     return hx, hy, (x1, y1)
-
 
 def analyze_orion_target(image_path, output_path="scored_output_warped.jpg", debug=False, debug_prefix=""):
     raw_img = cv2.imread(image_path)
@@ -237,11 +193,8 @@ def analyze_orion_target(image_path, output_path="scored_output_warped.jpg", deb
     for cnt in bull_contours:
         area = cv2.contourArea(cnt)
         if area > 800:
-            # Use minEnclosingCircle instead of moments. It ignores inward "bites" 
-            # taken out of the contour by edge shots, keeping the center perfectly stable.
             (cx_float, cy_float), radius = cv2.minEnclosingCircle(cnt)
             cx, cy = int(cx_float), int(cy_float)
-
             perimeter = cv2.arcLength(cnt, True)
             circularity = (4 * np.pi * area) / (perimeter ** 2) if perimeter > 0 else 0
             
@@ -286,15 +239,46 @@ def analyze_orion_target(image_path, output_path="scored_output_warped.jpg", deb
         target_center_global = (tx, ty)
 
         neighbor_dist = _nearest_neighbor_distance(idx - 1, targets_to_score)
+        
+        # PASS 1: Keep the original wide search radius to scan outer dotted lines
         if neighbor_dist is not None:
             search_radius = max(r * 1.3, min(neighbor_dist * 0.48, r * 3.5))
         else:
             search_radius = r * 3.0
 
         tag = f"{debug_prefix}t{idx}" if debug else None
-        hx, hy, (x1, y1) = find_shot_hole(gray, tx, ty, r, search_radius, debug_tag=tag)
+        
+        # Run original scan with the shift trick
+        hx, hy, offset_coords = find_shot_hole(gray, tx, ty, r, search_radius, use_shift=True, debug_tag=tag)
 
+        # Preliminary distance check to see if Pass 1 found a realistic hole
+        dist_mm_prelim = 999.0
         if hx is not None:
+            dist_px = np.sqrt((hx - (tx - offset_coords[0]))**2 + (hy - (ty - offset_coords[1]))**2)
+            mm_per_px = 30.5 / (r * 2)
+            dist_mm_prelim = dist_px * mm_per_px
+
+        # PASS 2 (Fallback Trigger): If Pass 1 found nothing, OR if it found something 
+        # suspiciously far out (like the printed '9'), run the strict border scan.
+        if hx is None or dist_mm_prelim > 27.0:
+            border_search_radius = r * 1.3  # Restrict strictly to the black/white edge
+            tag_fallback = f"{tag}_fallback" if tag else None
+            
+            # Run without the shift trick so edge holes are not erased
+            hx2, hy2, offset_coords2 = find_shot_hole(
+                gray, tx, ty, r, 
+                border_search_radius, 
+                use_shift=False, 
+                debug_tag=tag_fallback
+            )
+            
+            # If the fallback found a valid border hole, overwrite Pass 1's data
+            if hx2 is not None:
+                hx, hy, offset_coords = hx2, hy2, offset_coords2
+
+        # Final Scoring Logic
+        if hx is not None:
+            x1, y1 = offset_coords
             shot_center_global = (x1 + hx, y1 + hy)
             dist_px = np.sqrt((hx - (tx - x1))**2 + (hy - (ty - y1))**2)
 
