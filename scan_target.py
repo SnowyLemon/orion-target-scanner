@@ -1,5 +1,50 @@
 import cv2
 import numpy as np
+from skimage.filters import threshold_local
+from skimage.exposure import rescale_intensity
+
+def enhance_target_sheet(image):
+    """
+    CamScanner-style enhancement of the flattened target sheet.
+
+    The goal (per the "Magic AI Pro" vibe) is a crisp high-contrast black &
+    white scan: uneven lighting from a phone photo is flattened with a LOCAL
+    Otsu threshold, so the printed black aiming marks / scoring rings and the
+    shot holes read as near-pure black against a near-pure white paper
+    background regardless of where the light fell on the sheet.
+
+    Returns a uint8 single-channel (grayscale) image. Callers that need a BGR
+    image for drawing (OpenCV overlay text/lines) should wrap the result with
+    cv2.cvtColor(..., cv2.COLOR_GRAY2BGR).
+    """
+    # Work on a grayscale copy so the filter is purely intensity-based.
+    if image.ndim == 3:
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = image
+
+    # Stretch the dynamic range first so the adaptive threshold operates on
+    # the full 0-255 span (handy when a photo is washed out / low contrast).
+    gray = rescale_intensity(gray, out_range=(0, 255)).astype(np.uint8)
+
+    # Local Otsu: compute a threshold per block instead of one global cut.
+    # Block size MUST be odd and >= the largest printed feature we want to
+    # preserve as solid black (the aiming marks); 31px comfortably covers the
+    # rings on a 1000x1300 flattened sheet while still adapting to shadows.
+    block_size = 31
+    local_thresh = threshold_local(gray, block_size, offset=10, method="gaussian")
+
+    # threshold_local returns a per-pixel threshold array; pixels darker than
+    # their local threshold become black (ink), the rest become white (paper).
+    binary = (gray > local_thresh).astype(np.uint8) * 255
+
+    # Light morphological cleanup: knock out single-pixel pepper/noise specks
+    # without eroding the real shot holes (which are several px across).
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
+    binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+
+    return binary
 
 def order_points(pts):
     """
@@ -180,8 +225,16 @@ def analyze_orion_target(image_path, output_path="scored_output_warped.jpg"):
 
     # 1. AUTO-PERSPECTIVE CORRECTION (Un-skew and flatten photo)
     img = auto_flatten_target_sheet(raw_img)
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+    # 1b. SCIKIT-IMAGE ENHANCEMENT — CamScanner-style high-contrast B&W.
+    # The flattened sheet is run through a local Otsu threshold so the printed
+    # marks and shot holes are near-pure black on white regardless of lighting,
+    # which makes downstream bullseye / shot-hole detection more accurate. `gray`
+    # (the filtered image) drives ALL detection below; `img` is rebuilt from it
+    # as a BGR canvas so the final scored preview also reads as crisp B&W.
+    gray = enhance_target_sheet(img)
     h, w = gray.shape[:2]
+    img = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
 
     # 2. Locate central sighter box (SS targets)
     _, thresh = cv2.threshold(gray, 100, 255, cv2.THRESH_BINARY_INV)
