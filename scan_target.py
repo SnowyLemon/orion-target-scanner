@@ -65,83 +65,87 @@ def _nearest_neighbor_distance(idx, targets):
     return best
 
 
-def find_shot_hole(gray, tx, ty, r, search_radius, debug_tag=None):
+def find_shot_hole(gray, tx, ty, r, search_radius):
     """
-    Locates the bullet hole near a target center using radial-median
-    background subtraction.
+    Locates the bullet hole near a target center.
 
-    Why this replaces the old "inside black circle -> bright test" /
-    "outside on white paper -> dark test" zone split: that split left an
-    unclassified ring of pixels right at the printed-circle boundary
-    (roughly 0.95r-1.05r), and any hole straddling that boundary got
-    half-judged by each test -- so neither half alone passed the
-    area/circularity filter and the hole was missed entirely (scored 0.0).
-    Even when a hole WAS detected, if only part of it fell within the
-    "correct" zone, the centroid was computed from that partial blob only,
-    dragging the reported center toward the edge of the true hole instead
-    of its middle -- the "overshoots to the edge" symptom.
+    FIX (bug report: holes outside the black aiming mark were never detected):
+    - `search_radius` now covers the full usable scoring area around the target
+      (computed by the caller from the sheet's actual target spacing) instead of
+      a fixed 0.92 * r, which previously discarded anything past the edge of the
+      black circle before contours were even found.
+    - Holes are now flagged as blobs that are either BRIGHTER or DARKER than
+      their immediate local background (via a blurred local-background estimate),
+      instead of only "brighter than 170". A hole punched through black ink
+      exposes lighter backing (bright blob); a hole in the white paper area
+      reads as a shadowed/torn dark blob. The old single-direction bright
+      threshold only ever matched the first case.
 
-    A generic local-contrast method (e.g. top-hat/black-hat) was tried and
-    rejected: because the target face is covered in real printed features
-    (the outer black/white boundary, concentric dotted scoring rings), any
-    method that flags "locally different from neighboring pixels" fires on
-    those printed edges too, not just on holes -- it can't tell a printed
-    ring from a punched hole.
+    FIX (bug report: holes near the edge of the black circle were missed):
+    - The inside/outside zones used to split at r*0.95 and r*1.05, leaving a
+      dead band (about the width of a real hole) that neither zone tested.
+      A hole centered near that band got sliced into two thin, low-circularity
+      crescents that failed the filters below, so it was dropped entirely -
+      that's what was showing up as a wrong/far-off "wild" detection or a
+      missed shot in the reported cases. The zones now split at the fitted
+      radius r itself (no gap), and the intensity thresholds (>170 / <140)
+      already keep the sharp printed edge itself from being misread as a hole,
+      so no buffer band is needed.
 
-    Radial-median subtraction fixes this by using the fact that the target
-    face is radially symmetric: at any given radius from the bullseye
-    center, the printed pattern (ink or paper, ring or gap) is the same at
-    every angle. So for each radius we compute the *median* brightness over
-    all angles at that radius -- this is robust to a single localized hole
-    (a minority of angles) while representing the true printed background.
-    Subtracting that expected-value-at-this-radius from the actual pixel
-    isolates only things that break radial symmetry: the hole. This
-    correctly ignores the boundary and the printed rings (which match their
-    own radius's expected value almost everywhere) while still lighting up
-    a hole wherever it sits, including squarely on the boundary itself.
+    Returns (hx, hy) in ROI-relative coords, and the ROI offset (x1, y1), or
+    (None, None), (None, None) if nothing found.
     """
     h, w = gray.shape[:2]
     margin = int(search_radius) + 5
     y1, y2 = max(0, ty - margin), min(h, ty + margin)
     x1, x2 = max(0, tx - margin), min(w, tx + margin)
-    roi = gray[y1:y2, x1:x2].astype(np.float32)
+    roi_gray = gray[y1:y2, x1:x2]
 
     rel_tx, rel_ty = tx - x1, ty - y1
-    yy, xx = np.indices(roi.shape)
+
+    yy, xx = np.indices(roi_gray.shape)
     dist_map = np.hypot(xx - rel_tx, yy - rel_ty)
-    search_mask = (dist_map <= search_radius)
 
-    if not search_mask.any():
+    # Zone A: inside the printed black circle -> hole reads bright against ink.
+    inside_mask = (dist_map <= r).astype(np.uint8) * 255
+    _, bright_thresh = cv2.threshold(roi_gray, 170, 255, cv2.THRESH_BINARY)
+    bright_holes = cv2.bitwise_and(bright_thresh, inside_mask)
+
+    # Zone B: outside the black circle, out to the usable search radius ->
+    # hole reads as a shadowed/torn dark spot against the white paper.
+    outside_mask = ((dist_map > r) & (dist_map <= search_radius)).astype(np.uint8) * 255
+    _, dark_thresh = cv2.threshold(roi_gray, 140, 255, cv2.THRESH_BINARY_INV)
+    dark_holes = cv2.bitwise_and(dark_thresh, outside_mask)
+
+    hole_thresh = cv2.bitwise_or(bright_holes, dark_holes)
+
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    hole_thresh = cv2.morphologyEx(hole_thresh, cv2.MORPH_OPEN, kernel)
+
+    hole_contours, _ = cv2.findContours(hole_thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    valid_holes = []
+    for cnt in hole_contours:
+        area = cv2.contourArea(cnt)
+        if area <= 15:
+            continue
+        perimeter = cv2.arcLength(cnt, True)
+        circularity = (4 * np.pi * area) / (perimeter ** 2) if perimeter > 0 else 0
+        if circularity > 0.35:
+            valid_holes.append(cnt)
+
+    if not valid_holes:
         return None, None, (x1, y1)
 
-    r_int = dist_map.astype(np.int32)
-    max_r = int(search_radius) + 2
-    overall_median = float(np.median(roi[search_mask]))
-    expected = np.full(max_r + 1, overall_median, dtype=np.float32)
-    for rad in range(max_r + 1):
-        ring = (r_int == rad) & search_mask
-        if ring.any():
-            expected[rad] = np.median(roi[ring])
-    expected_map = expected[np.clip(r_int, 0, max_r)]
+    largest_hole = max(valid_holes, key=cv2.contourArea)
+    M = cv2.moments(largest_hole)
+    if M["m00"] != 0:
+        hx = int(M["m10"] / M["m00"])
+        hy = int(M["m01"] / M["m00"])
+    else:
+        hx, hy = rel_tx, rel_ty
 
-    deviation = np.abs(roi - expected_map)
-    deviation[~search_mask] = 0
-
-    vals = deviation[search_mask]
-    if vals.size == 0 or vals.max() < 20:
-        return None, None, (x1, y1)
-
-    close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-    open_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-
-    # Expected real-hole size, from the known pellet caliber (4.5mm) and
-    # this target's mm-per-pixel scale, used to sanity-check candidates so
-    # we don't accept an implausibly huge or tiny blob (e.g. print smudges,
-    # or a fleck of noise).
-    mm_per_px_est = 30.5 / (r * 2)
-    expected_hole_area = np.pi * ((4.5 / 2) / mm_per_px_est) ** 2
-    max_allowed_area = expected_hole_area * 6.0
-    min_allowed_area = max(10.0, expected_hole_area * 0.12)
+    return hx, hy, (x1, y1)
 
     def _extract_blobs(mask_u8):
         mask_u8 = cv2.morphologyEx(mask_u8, cv2.MORPH_CLOSE, close_kernel)
