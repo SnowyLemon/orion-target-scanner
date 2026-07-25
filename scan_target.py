@@ -237,6 +237,11 @@ def analyze_orion_target(image_path, output_path="scored_output_warped.jpg", deb
     if debug:
         cv2.imwrite("debug_normalized.jpg", gray)
 
+    # NEW: draw the scoring overlay on the filtered image itself (converted
+    # to BGR so the colored annotations still show up), instead of on the
+    # original color photo. `img` is no longer used past this point.
+    img = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+
     h, w = gray.shape[:2]
 
     # 2. Locate central sighter box (SS targets)
@@ -369,15 +374,10 @@ def analyze_orion_target(image_path, output_path="scored_output_warped.jpg", deb
     total_score = round(sum(scores), 1)
     
     cv2.imwrite(output_path, img)
-
-    # NEW: return the normalized/filtered grayscale image too (the same thing
-    # debug=True saves to disk), so a caller (e.g. the web server) can show it
-    # to the user alongside the scored overlay - this is the "filtered version"
-    # of the photo, same idea as the test(2) example.
-    return scores, distances_mm, total_score, gray
+    return scores, distances_mm, total_score
 
 if __name__ == "__main__":
-    individual_scores, distances, total, filtered_img = analyze_orion_target("image2.png", debug=True)
+    individual_scores, distances, total = analyze_orion_target("image2.png", debug=True)
     
     print("\n--- TARGET SCORING RESULTS ---")
     for i in range(len(individual_scores)):
