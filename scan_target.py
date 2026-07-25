@@ -70,6 +70,28 @@ def auto_flatten_target_sheet(image):
         print("[INFO] Outer paper border not detected with high confidence. Using raw image.")
         return cv2.resize(image, (1000, 1300))
 
+def normalize_lighting(gray):
+    """
+    NEW (fixes scan-to-scan inconsistency): evens out shadows, glare, and
+    vignetting across the photographed sheet before any thresholding happens.
+
+    Every downstream detection step in this file used to compare pixels
+    against fixed absolute brightness constants (100, 80, 170, 140...). Those
+    only work for the exact lighting condition they were tuned on - a shadow
+    from the phone or a hand, glare on one side, or angle-dependent falloff
+    toward the edges of the frame will shift real pixel values enough to flip
+    a detection, especially for targets far from the sheet's center.
+
+    CLAHE (Contrast Limited Adaptive Histogram Equalization) rescales
+    contrast within small local tiles instead of across the whole image, so
+    a shadow over the outer targets no longer makes that part of the sheet
+    read differently than the rest. A light blur afterward keeps CLAHE from
+    amplifying sensor noise in the flat white paper areas.
+    """
+    clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(16, 16))
+    equalized = clahe.apply(gray)
+    return cv2.GaussianBlur(equalized, (3, 3), 0)
+
 def draw_dotted_line(img, pt1, pt2, color=(0, 255, 255), gap=5):
     """Draws a dotted line between two point tuples (x, y)."""
     dist = np.hypot(pt2[0] - pt1[0], pt2[1] - pt1[1])
@@ -94,6 +116,25 @@ def _nearest_neighbor_distance(idx, targets):
             best = d
     return best
 
+def _local_otsu(roi_gray, mask, fallback, lo, hi, inverse=False):
+    """
+    NEW: computes an Otsu threshold from only the pixels under `mask`,
+    clamped to [lo, hi]. This replaces a single fixed brightness constant
+    with one that adapts to each target's own local lighting.
+
+    Falls back to `fallback` if there aren't enough pixels under the mask
+    for a stable estimate (e.g. a target sitting right at the sheet edge
+    with a clipped ROI). The [lo, hi] clamp keeps a near-uniform region
+    (no real hole present) from letting Otsu drift to a wild, noise-picking
+    value - it can adapt within a sane range, but not run away.
+    """
+    pixels = roi_gray[mask > 0]
+    if pixels.size < 40:
+        return fallback
+    flag = cv2.THRESH_BINARY_INV if inverse else cv2.THRESH_BINARY
+    cut, _ = cv2.threshold(pixels.reshape(-1, 1), 0, 255, flag | cv2.THRESH_OTSU)
+    return int(np.clip(cut, lo, hi))
+
 def find_shot_hole(gray, tx, ty, r, search_radius):
     """
     Locates the bullet hole near a target center.
@@ -104,11 +145,17 @@ def find_shot_hole(gray, tx, ty, r, search_radius):
       a fixed 0.92 * r, which previously discarded anything past the edge of the
       black circle before contours were even found.
     - Holes are now flagged as blobs that are either BRIGHTER or DARKER than
-      their immediate local background (via a blurred local-background estimate),
-      instead of only "brighter than 170". A hole punched through black ink
-      exposes lighter backing (bright blob); a hole in the white paper area
-      reads as a shadowed/torn dark blob. The old single-direction bright
-      threshold only ever matched the first case.
+      their immediate local background, instead of only "brighter than 170".
+      A hole punched through black ink exposes lighter backing (bright blob);
+      a hole in the white paper area reads as a shadowed/torn dark blob. The
+      old single-direction bright threshold only ever matched the first case.
+
+    FIX (inconsistent scan-to-scan results, worse for outer targets):
+    - The bright/dark cutoffs are no longer fixed constants (170 / 140).
+      Each zone now runs `_local_otsu` on just the pixels in that target's own
+      ROI, so the cutoff adapts to that target's local brightness instead of
+      assuming the whole sheet is lit identically. The old constants remain
+      as fallback/clamp bounds for safety.
 
     Returns (hx, hy) in ROI-relative coords, and the ROI offset (x1, y1), or
     (None, None), (None, None) if nothing found.
@@ -129,30 +176,15 @@ def find_shot_hole(gray, tx, ty, r, search_radius):
     dist_map = np.hypot(xx - rel_tx, yy - rel_ty)
 
     # Zone A: inside the printed black circle -> hole reads bright against ink.
-    inside_mask = (dist_map <= r).astype(np.uint8) * 255
-    outside_mask = ((dist_map > r) & (dist_map <= search_radius)).astype(np.uint8) * 255
-
-    # ADAPTIVE THRESHOLD instead of fixed magic numbers (170 / 140).
-    # A hole's brightest pixels can land anywhere from ~250 (fully punched,
-    # well lit) down to ~150 (grazed, shadowed, dim phone lighting) - still
-    # clearly brighter than the surrounding ink (~20-40), just not brighter
-    # than a universal "170". Otsu finds the split point that best separates
-    # ink from hole *for this target's own pixels*, so it adapts per-shot.
-    inside_pixels = roi_gray[inside_mask > 0]
-    if inside_pixels.size > 0:
-        bright_cut, _ = cv2.threshold(inside_pixels.reshape(-1, 1), 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        bright_cut = float(np.clip(bright_cut, 90, 180))
-    else:
-        bright_cut = 170
+    inside_mask = (dist_map <= r * 0.95).astype(np.uint8) * 255
+    bright_cut = _local_otsu(roi_gray, inside_mask, fallback=170, lo=140, hi=220)
     _, bright_thresh = cv2.threshold(roi_gray, bright_cut, 255, cv2.THRESH_BINARY)
     bright_holes = cv2.bitwise_and(bright_thresh, inside_mask)
 
-    outside_pixels = roi_gray[outside_mask > 0]
-    if outside_pixels.size > 0:
-        dark_cut, _ = cv2.threshold(outside_pixels.reshape(-1, 1), 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        dark_cut = float(np.clip(dark_cut, 100, 170))
-    else:
-        dark_cut = 140
+    # Zone B: outside the black circle, out to the usable search radius ->
+    # hole reads as a shadowed/torn dark spot against the white paper.
+    outside_mask = ((dist_map >= r * 1.05) & (dist_map <= search_radius)).astype(np.uint8) * 255
+    dark_cut = _local_otsu(roi_gray, outside_mask, fallback=140, lo=100, hi=170, inverse=True)
     _, dark_thresh = cv2.threshold(roi_gray, dark_cut, 255, cv2.THRESH_BINARY_INV)
     dark_holes = cv2.bitwise_and(dark_thresh, outside_mask)
 
@@ -190,7 +222,7 @@ def find_shot_hole(gray, tx, ty, r, search_radius):
 
     return hx, hy, (x1, y1)
 
-def analyze_orion_target(image_path, output_path="scored_output_warped.jpg"):
+def analyze_orion_target(image_path, output_path="scored_output_warped.jpg", debug=False):
     raw_img = cv2.imread(image_path)
     if raw_img is None:
         raise FileNotFoundError(f"Could not open image at {image_path}")
@@ -198,10 +230,20 @@ def analyze_orion_target(image_path, output_path="scored_output_warped.jpg"):
     # 1. AUTO-PERSPECTIVE CORRECTION (Un-skew and flatten photo)
     img = auto_flatten_target_sheet(raw_img)
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+    # NEW: normalize lighting before any detection happens. This is the main
+    # fix for scan-to-scan inconsistency - see normalize_lighting() docstring.
+    gray = normalize_lighting(gray)
+    if debug:
+        cv2.imwrite("debug_normalized.jpg", gray)
+
     h, w = gray.shape[:2]
 
     # 2. Locate central sighter box (SS targets)
-    _, thresh = cv2.threshold(gray, 100, 255, cv2.THRESH_BINARY_INV)
+    # CHANGED: fixed threshold of 100 -> Otsu, so the cutoff is picked per-photo
+    # instead of assuming a fixed brightness level that may not hold for this
+    # particular lighting condition.
+    _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
     contours, _ = cv2.findContours(thresh, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
     
     sighter_box = None
@@ -215,7 +257,10 @@ def analyze_orion_target(image_path, output_path="scored_output_warped.jpg"):
                 break
 
     # 3. Detect target bullseyes & calculate centers
-    _, dark_thresh = cv2.threshold(gray, 80, 255, cv2.THRESH_BINARY_INV)
+    # CHANGED: fixed threshold of 80 -> Otsu, same reasoning as above.
+    _, dark_thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    if debug:
+        cv2.imwrite("debug_bullseye_thresh.jpg", dark_thresh)
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
     dark_thresh = cv2.morphologyEx(dark_thresh, cv2.MORPH_OPEN, kernel)
     
@@ -327,10 +372,10 @@ def analyze_orion_target(image_path, output_path="scored_output_warped.jpg"):
     return scores, distances_mm, total_score
 
 if __name__ == "__main__":
-    individual_scores, distances, total = analyze_orion_target("image2.png")
+    individual_scores, distances, total = analyze_orion_target("image2.png", debug=True)
     
     print("\n--- TARGET SCORING RESULTS ---")
     for i in range(len(individual_scores)):
         print(f"Target {i+1}: Score = {individual_scores[i]} | Distance = {distances[i]} mm")
     print("------------------------------")
-    print(f"TOTAL SCORE: {total} / 109.0\n")    
+    print(f"TOTAL SCORE: {total} / 109.0\n")
