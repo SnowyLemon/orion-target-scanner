@@ -2,6 +2,4 @@ fastapi
 uvicorn[standard]
 opencv-python-headless
 numpy
-scikit-image
-Pillow
 python-multipart
