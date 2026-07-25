@@ -129,14 +129,31 @@ def find_shot_hole(gray, tx, ty, r, search_radius):
     dist_map = np.hypot(xx - rel_tx, yy - rel_ty)
 
     # Zone A: inside the printed black circle -> hole reads bright against ink.
-    inside_mask = (dist_map <= r * 0.95).astype(np.uint8) * 255
-    _, bright_thresh = cv2.threshold(roi_gray, 170, 255, cv2.THRESH_BINARY)
+    inside_mask = (dist_map <= r).astype(np.uint8) * 255
+    outside_mask = ((dist_map > r) & (dist_map <= search_radius)).astype(np.uint8) * 255
+
+    # ADAPTIVE THRESHOLD instead of fixed magic numbers (170 / 140).
+    # A hole's brightest pixels can land anywhere from ~250 (fully punched,
+    # well lit) down to ~150 (grazed, shadowed, dim phone lighting) - still
+    # clearly brighter than the surrounding ink (~20-40), just not brighter
+    # than a universal "170". Otsu finds the split point that best separates
+    # ink from hole *for this target's own pixels*, so it adapts per-shot.
+    inside_pixels = roi_gray[inside_mask > 0]
+    if inside_pixels.size > 0:
+        bright_cut, _ = cv2.threshold(inside_pixels.reshape(-1, 1), 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        bright_cut = float(np.clip(bright_cut, 90, 180))
+    else:
+        bright_cut = 170
+    _, bright_thresh = cv2.threshold(roi_gray, bright_cut, 255, cv2.THRESH_BINARY)
     bright_holes = cv2.bitwise_and(bright_thresh, inside_mask)
 
-    # Zone B: outside the black circle, out to the usable search radius ->
-    # hole reads as a shadowed/torn dark spot against the white paper.
-    outside_mask = ((dist_map >= r * 1.05) & (dist_map <= search_radius)).astype(np.uint8) * 255
-    _, dark_thresh = cv2.threshold(roi_gray, 140, 255, cv2.THRESH_BINARY_INV)
+    outside_pixels = roi_gray[outside_mask > 0]
+    if outside_pixels.size > 0:
+        dark_cut, _ = cv2.threshold(outside_pixels.reshape(-1, 1), 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        dark_cut = float(np.clip(dark_cut, 100, 170))
+    else:
+        dark_cut = 140
+    _, dark_thresh = cv2.threshold(roi_gray, dark_cut, 255, cv2.THRESH_BINARY_INV)
     dark_holes = cv2.bitwise_and(dark_thresh, outside_mask)
 
     hole_thresh = cv2.bitwise_or(bright_holes, dark_holes)
