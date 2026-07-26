@@ -100,7 +100,7 @@ HTML_CONTENT = """
                 });
                 
                 const formattedTotal = Number.isInteger(data.total_score) ? data.total_score.toFixed(1) : data.total_score;
-                html += `<div class="total">Total Score: ${formattedTotal} / 109.0</div>`;
+                html += `<div class="total">Total Score: ${formattedTotal}</div>`;
                 
                 document.getElementById('results').innerHTML = html;
                 
