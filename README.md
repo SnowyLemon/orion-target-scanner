@@ -1,6 +1,7 @@
 # Watch the Video for Setup  
 Works on:  
-PC/MacBook (select images to directly upload, only Web Access  
+PC/MacBook (select images to directly upload, only Web Access)
+<br>
 iOS/Android (scans images using camera, Web Access + option of App Access)  
 Completely Free to Use to Anyone - Graded With ISSF 10.9 decimal scoring system
 -----------------------------------------------------------------------------  
