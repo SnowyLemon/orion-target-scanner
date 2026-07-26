@@ -84,17 +84,14 @@ def find_shot_hole(gray, tx, ty, r, search_radius, use_shift=True, debug_tag=Non
     overall_median = float(np.median(roi[search_mask]))
     expected = np.full(max_r + 1, overall_median, dtype=np.float32)
     
-    # FIX 1: Robust Expected Map (Cures Dead-Center Blindness)
     for rad in range(max_r + 1):
         ring = (r_int == rad) & search_mask
         if ring.any():
             val = np.median(roi[ring])
-            # If inside the black bullseye, enforce a dark baseline so dead-center holes don't erase themselves
             if rad < r * 0.85:
                 val = min(val, overall_median + 15.0)
             expected[rad] = val
             
-    # FIX 2: Targeted Shift Logic (Cures Outer/Edge-Shot Suppression)
     deviation = np.abs(roi - expected[np.clip(r_int, 0, max_r)])
     if use_shift:
         devs = []
@@ -103,7 +100,6 @@ def find_shot_hole(gray, tx, ty, r, search_radius, use_shift=True, debug_tag=Non
             devs.append(np.abs(roi - shifted_expected))
         min_dev = np.minimum.reduce(devs)
         
-        # Apply the aggressive smoothing ONLY at the printed black/white boundary
         border_mask = (dist_map > r * 0.8) & (dist_map < r * 1.2)
         deviation = np.where(border_mask, min_dev, deviation)
         
@@ -121,7 +117,6 @@ def find_shot_hole(gray, tx, ty, r, search_radius, use_shift=True, debug_tag=Non
     max_allowed_area = expected_hole_area * 6.0
     min_allowed_area = max(10.0, expected_hole_area * 0.12)
 
-    # FIX 3: Distance Proximity Tie-Breaker (Cures Snapping to printed labels)
     def _extract_blobs(mask_u8):
         mask_u8 = cv2.morphologyEx(mask_u8, cv2.MORPH_CLOSE, close_kernel)
         mask_u8 = cv2.morphologyEx(mask_u8, cv2.MORPH_OPEN, open_kernel)
@@ -134,7 +129,6 @@ def find_shot_hole(gray, tx, ty, r, search_radius, use_shift=True, debug_tag=Non
             perimeter = cv2.arcLength(cnt, True)
             circularity = (4 * np.pi * area) / (perimeter ** 2) if perimeter > 0 else 0
             
-            # Slightly relaxed circularity (0.20 instead of 0.25) to allow for jagged tearing
             if circularity > 0.20:
                 M = cv2.moments(cnt)
                 if M["m00"] != 0:
@@ -166,7 +160,6 @@ def find_shot_hole(gray, tx, ty, r, search_radius, use_shift=True, debug_tag=Non
     best_candidates.sort(key=lambda t: t[1], reverse=True)
     top = best_candidates[:3]
     
-    # NEW TIE-BREAKER: Pick the candidate closest to the actual target center, ignoring circularity
     best_candidate = min(top, key=lambda t: t[3])
     largest_hole = best_candidate[0]
 
@@ -301,11 +294,11 @@ def analyze_orion_target(image_path, output_path="scored_output_warped.jpg", deb
             cv2.circle(img, target_center_global, 3, (255, 255, 0), -1)
             cv2.circle(img, shot_center_global, 4, (0, 0, 255), -1)
 
-            label_text = f"#{idx}: {score} ({dist_mm:.2f}mm)"
+            label_text = f"#{idx}: {score:.1f} ({dist_mm:.2f}mm)"
         else:
             score = 0.0
             dist_mm = 0.0
-            label_text = f"#{idx}: {score}"
+            label_text = f"#{idx}: {score:.1f}"
 
         scores.append(score)
         distances_mm.append(round(dist_mm, 2))
