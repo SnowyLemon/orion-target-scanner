@@ -30,7 +30,7 @@ HTML_CONTENT = """
         body { font-family: -apple-system, sans-serif; text-align: center; padding: 20px; background: #f4f4f9; }
         .card { background: white; border-radius: 12px; padding: 20px; box-shadow: 0 4px 10px rgba(0,0,0,0.1); max-width: 500px; margin: auto; }
         
-        /* NEW: Watermark styling */
+        /* Watermark styling */
         .watermark {
             position: absolute;
             top: 15px;
@@ -100,6 +100,8 @@ HTML_CONTENT = """
                 });
                 
                 const formattedTotal = Number.isInteger(data.total_score) ? data.total_score.toFixed(1) : data.total_score;
+                
+                // REMOVED the " / 109.0" string from this line
                 html += `<div class="total">Total Score: ${formattedTotal}</div>`;
                 
                 document.getElementById('results').innerHTML = html;
