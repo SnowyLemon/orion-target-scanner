@@ -1,4 +1,4 @@
-#Watch the Video for Setup  
+# Watch the Video for Setup  
 -----------------------------------------------------------------------------  
 Works on: PC/MacBook (select images to directly upload, only Web Access
           iOS/Android (scans images using camera, Web Access + option of App Access)
