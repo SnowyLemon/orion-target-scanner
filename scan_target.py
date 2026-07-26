@@ -83,22 +83,29 @@ def find_shot_hole(gray, tx, ty, r, search_radius, use_shift=True, debug_tag=Non
     max_r = int(search_radius) + 2
     overall_median = float(np.median(roi[search_mask]))
     expected = np.full(max_r + 1, overall_median, dtype=np.float32)
+    
+    # FIX 1: Robust Expected Map (Cures Dead-Center Blindness)
     for rad in range(max_r + 1):
         ring = (r_int == rad) & search_mask
         if ring.any():
-            expected[rad] = np.median(roi[ring])
+            val = np.median(roi[ring])
+            # If inside the black bullseye, enforce a dark baseline so dead-center holes don't erase themselves
+            if rad < r * 0.85:
+                val = min(val, overall_median + 15.0)
+            expected[rad] = val
             
-    # The toggle for the fallback method. 
-    # use_shift=True is the original behavior. 
-    # use_shift=False isolates the true hole on the border without erasing it.
+    # FIX 2: Targeted Shift Logic (Cures Outer/Edge-Shot Suppression)
+    deviation = np.abs(roi - expected[np.clip(r_int, 0, max_r)])
     if use_shift:
         devs = []
         for offset in [-2, -1, 0, 1, 2]:
             shifted_expected = expected[np.clip(r_int + offset, 0, max_r)]
             devs.append(np.abs(roi - shifted_expected))
-        deviation = np.minimum.reduce(devs)
-    else:
-        deviation = np.abs(roi - expected[np.clip(r_int, 0, max_r)])
+        min_dev = np.minimum.reduce(devs)
+        
+        # Apply the aggressive smoothing ONLY at the printed black/white boundary
+        border_mask = (dist_map > r * 0.8) & (dist_map < r * 1.2)
+        deviation = np.where(border_mask, min_dev, deviation)
         
     deviation[~search_mask] = 0
 
@@ -114,6 +121,7 @@ def find_shot_hole(gray, tx, ty, r, search_radius, use_shift=True, debug_tag=Non
     max_allowed_area = expected_hole_area * 6.0
     min_allowed_area = max(10.0, expected_hole_area * 0.12)
 
+    # FIX 3: Distance Proximity Tie-Breaker (Cures Snapping to printed labels)
     def _extract_blobs(mask_u8):
         mask_u8 = cv2.morphologyEx(mask_u8, cv2.MORPH_CLOSE, close_kernel)
         mask_u8 = cv2.morphologyEx(mask_u8, cv2.MORPH_OPEN, open_kernel)
@@ -125,8 +133,15 @@ def find_shot_hole(gray, tx, ty, r, search_radius, use_shift=True, debug_tag=Non
                 continue
             perimeter = cv2.arcLength(cnt, True)
             circularity = (4 * np.pi * area) / (perimeter ** 2) if perimeter > 0 else 0
-            if circularity > 0.25:
-                found.append((cnt, area, circularity))
+            
+            # Slightly relaxed circularity (0.20 instead of 0.25) to allow for jagged tearing
+            if circularity > 0.20:
+                M = cv2.moments(cnt)
+                if M["m00"] != 0:
+                    cx = M["m10"] / M["m00"]
+                    cy = M["m01"] / M["m00"]
+                    dist_to_center = np.hypot(cx - rel_tx, cy - rel_ty)
+                    found.append((cnt, area, circularity, dist_to_center))
         return found, mask_u8
 
     best_candidates, best_mask = [], None
@@ -150,7 +165,10 @@ def find_shot_hole(gray, tx, ty, r, search_radius, use_shift=True, debug_tag=Non
 
     best_candidates.sort(key=lambda t: t[1], reverse=True)
     top = best_candidates[:3]
-    largest_hole = max(top, key=lambda t: t[2])[0]
+    
+    # NEW TIE-BREAKER: Pick the candidate closest to the actual target center, ignoring circularity
+    best_candidate = min(top, key=lambda t: t[3])
+    largest_hole = best_candidate[0]
 
     M = cv2.moments(largest_hole)
     if M["m00"] != 0:
@@ -237,10 +255,8 @@ def analyze_orion_target(image_path, output_path="scored_output_warped.jpg", deb
 
     for idx, (tx, ty, r) in enumerate(targets_to_score, start=1):
         target_center_global = (tx, ty)
-
         neighbor_dist = _nearest_neighbor_distance(idx - 1, targets_to_score)
         
-        # PASS 1: Keep the original wide search radius to scan outer dotted lines
         if neighbor_dist is not None:
             search_radius = max(r * 1.3, min(neighbor_dist * 0.48, r * 3.5))
         else:
@@ -248,23 +264,18 @@ def analyze_orion_target(image_path, output_path="scored_output_warped.jpg", deb
 
         tag = f"{debug_prefix}t{idx}" if debug else None
         
-        # Run original scan with the shift trick
         hx, hy, offset_coords = find_shot_hole(gray, tx, ty, r, search_radius, use_shift=True, debug_tag=tag)
 
-        # Preliminary distance check to see if Pass 1 found a realistic hole
         dist_mm_prelim = 999.0
         if hx is not None:
             dist_px = np.sqrt((hx - (tx - offset_coords[0]))**2 + (hy - (ty - offset_coords[1]))**2)
             mm_per_px = 30.5 / (r * 2)
             dist_mm_prelim = dist_px * mm_per_px
 
-        # PASS 2 (Fallback Trigger): If Pass 1 found nothing, OR if it found something 
-        # suspiciously far out (like the printed '9'), run the strict border scan.
         if hx is None or dist_mm_prelim > 27.0:
-            border_search_radius = r * 1.3  # Restrict strictly to the black/white edge
+            border_search_radius = r * 1.3  
             tag_fallback = f"{tag}_fallback" if tag else None
             
-            # Run without the shift trick so edge holes are not erased
             hx2, hy2, offset_coords2 = find_shot_hole(
                 gray, tx, ty, r, 
                 border_search_radius, 
@@ -272,11 +283,9 @@ def analyze_orion_target(image_path, output_path="scored_output_warped.jpg", deb
                 debug_tag=tag_fallback
             )
             
-            # If the fallback found a valid border hole, overwrite Pass 1's data
             if hx2 is not None:
                 hx, hy, offset_coords = hx2, hy2, offset_coords2
 
-        # Final Scoring Logic
         if hx is not None:
             x1, y1 = offset_coords
             shot_center_global = (x1 + hx, y1 + hy)
@@ -306,6 +315,5 @@ def analyze_orion_target(image_path, output_path="scored_output_warped.jpg", deb
         cv2.circle(img, (tx, ty), r, (255, 0, 0), 2)
 
     total_score = round(sum(scores), 1)
-
     cv2.imwrite(output_path, img)
     return scores, distances_mm, total_score
