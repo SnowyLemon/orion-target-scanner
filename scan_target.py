@@ -365,11 +365,11 @@ def analyze_orion_target(image_path, output_path="scored_output_warped.jpg", ove
         shot_offsets_mm.append((dx_mm, dy_mm))
 
         label_pos = (tx - r - 10, ty - r - 8)
-        # black outline first for contrast against any background, then the fill color on top
+        # white outline first for contrast against any background, then navy fill on top
         cv2.putText(img, label_text, label_pos,
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 4, cv2.LINE_AA)
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 4, cv2.LINE_AA)
         cv2.putText(img, label_text, label_pos,
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 140, 255), 1, cv2.LINE_AA)
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (128, 0, 0), 1, cv2.LINE_AA)
         cv2.circle(img, (tx, ty), r, (255, 0, 0), 2)
 
     total_score = round(sum(scores), 1)
