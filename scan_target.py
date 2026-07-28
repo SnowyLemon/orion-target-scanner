@@ -175,7 +175,12 @@ def find_shot_hole(gray, tx, ty, r, search_radius, use_shift=True, debug_tag=Non
 
 BLANK_TARGET_PATH = "static/blank_target.png"
 BLANK_TARGET_CENTER = (616, 612)   # measured center of the ring diagram, in px
-BLANK_TARGET_PX_PER_MM = 20.62     # matches the diagram's ring spacing to the score formula below
+# The diagram's solid black region ends at r=379.5px (measured). Scoring elsewhere
+# in this file assumes the black bull is 30.5mm in diameter (mm_per_px = 30.5/(r*2)),
+# i.e. a 15.25mm radius. Anchoring the diagram's black edge to that same 15.25mm
+# keeps "inside/outside the black" on this overlay consistent with what's actually
+# used to compute each shot's score.
+BLANK_TARGET_PX_PER_MM = 379.5 / 15.25
 PELLET_RADIUS_MM = 2.25            # 4.5mm pellet diameter, same assumption used in find_shot_hole
 
 def _load_blank_target():
@@ -359,8 +364,12 @@ def analyze_orion_target(image_path, output_path="scored_output_warped.jpg", ove
         distances_mm.append(round(dist_mm, 2))
         shot_offsets_mm.append((dx_mm, dy_mm))
 
-        cv2.putText(img, label_text, (tx - r - 10, ty - r - 8),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+        label_pos = (tx - r - 10, ty - r - 8)
+        # black outline first for contrast against any background, then the fill color on top
+        cv2.putText(img, label_text, label_pos,
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 4, cv2.LINE_AA)
+        cv2.putText(img, label_text, label_pos,
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 140, 255), 1, cv2.LINE_AA)
         cv2.circle(img, (tx, ty), r, (255, 0, 0), 2)
 
     total_score = round(sum(scores), 1)
