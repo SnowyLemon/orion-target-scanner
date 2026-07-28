@@ -68,7 +68,7 @@ HTML_CONTENT = """
         <div id="results"></div>
         <img id="scoredImage" style="display:none;" />
 
-        <h3 style="margin-top:20px;">All Shots Overlay</h3>
+        <h3 id="overlayHeading" style="display:none; margin-top:20px;">All Shots Overlay</h3>
         <img id="overlayImage" style="display:none;" />
     </div>
 
@@ -80,6 +80,7 @@ HTML_CONTENT = """
             document.getElementById('loading').style.display = 'block';
             document.getElementById('results').innerHTML = '';
             document.getElementById('scoredImage').style.display = 'none';
+            document.getElementById('overlayHeading').style.display = 'none';
             document.getElementById('overlayImage').style.display = 'none';
 
             const formData = new FormData();
@@ -114,6 +115,7 @@ HTML_CONTENT = """
                 img.src = 'data:image/jpeg;base64,' + data.image_base64;
                 img.style.display = 'block';
 
+                document.getElementById('overlayHeading').style.display = 'block';
                 const overlayImg = document.getElementById('overlayImage');
                 overlayImg.src = 'data:image/jpeg;base64,' + data.overlay_image_base64;
                 overlayImg.style.display = 'block';

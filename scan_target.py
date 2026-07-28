@@ -174,8 +174,8 @@ def find_shot_hole(gray, tx, ty, r, search_radius, use_shift=True, debug_tag=Non
 
 
 BLANK_TARGET_PATH = "static/blank_target.png"
-BLANK_TARGET_CENTER = (165, 165)   # measured center of the ring diagram, in px
-BLANK_TARGET_PX_PER_MM = 6.625     # matches the diagram's ring spacing to the score formula below
+BLANK_TARGET_CENTER = (616, 612)   # measured center of the ring diagram, in px
+BLANK_TARGET_PX_PER_MM = 20.62     # matches the diagram's ring spacing to the score formula below
 PELLET_RADIUS_MM = 2.25            # 4.5mm pellet diameter, same assumption used in find_shot_hole
 
 def _load_blank_target():
