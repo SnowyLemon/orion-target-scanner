@@ -67,6 +67,9 @@ HTML_CONTENT = """
         
         <div id="results"></div>
         <img id="scoredImage" style="display:none;" />
+
+        <h3 style="margin-top:20px;">All Shots Overlay</h3>
+        <img id="overlayImage" style="display:none;" />
     </div>
 
     <script>
@@ -77,6 +80,7 @@ HTML_CONTENT = """
             document.getElementById('loading').style.display = 'block';
             document.getElementById('results').innerHTML = '';
             document.getElementById('scoredImage').style.display = 'none';
+            document.getElementById('overlayImage').style.display = 'none';
 
             const formData = new FormData();
             formData.append('file', input.files[0]);
@@ -110,6 +114,10 @@ HTML_CONTENT = """
                 img.src = 'data:image/jpeg;base64,' + data.image_base64;
                 img.style.display = 'block';
 
+                const overlayImg = document.getElementById('overlayImage');
+                overlayImg.src = 'data:image/jpeg;base64,' + data.overlay_image_base64;
+                overlayImg.style.display = 'block';
+
             } catch (err) {
                 document.getElementById('loading').style.display = 'none';
                 alert('Upload failed: ' + err);
@@ -141,16 +149,21 @@ async def scan_target_endpoint(file: UploadFile = File(...)):
             f.write(contents)
         
         output_filename = "scored_mobile_output.jpg"
-        scores, distances, total_score = analyze_orion_target(temp_filename, output_filename)
+        overlay_filename = "scored_overlay.jpg"
+        scores, distances, total_score = analyze_orion_target(temp_filename, output_filename, overlay_filename)
         
         with open(output_filename, "rb") as f:
             encoded_img = base64.b64encode(f.read()).decode('utf-8')
+
+        with open(overlay_filename, "rb") as f:
+            overlay_encoded = base64.b64encode(f.read()).decode('utf-8')
             
         return {
             "scores": scores,
             "distances": distances,
             "total_score": total_score,
-            "image_base64": encoded_img
+            "image_base64": encoded_img,
+            "overlay_image_base64": overlay_encoded
         }
     except Exception as e:
         return {"error": str(e)}

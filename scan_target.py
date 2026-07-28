@@ -172,7 +172,56 @@ def find_shot_hole(gray, tx, ty, r, search_radius, use_shift=True, debug_tag=Non
 
     return hx, hy, (x1, y1)
 
-def analyze_orion_target(image_path, output_path="scored_output_warped.jpg", debug=False, debug_prefix=""):
+
+BLANK_TARGET_PATH = "static/blank_target.png"
+BLANK_TARGET_CENTER = (165, 165)   # measured center of the ring diagram, in px
+BLANK_TARGET_PX_PER_MM = 6.625     # matches the diagram's ring spacing to the score formula below
+PELLET_RADIUS_MM = 2.25            # 4.5mm pellet diameter, same assumption used in find_shot_hole
+
+def _load_blank_target():
+    img = cv2.imread(BLANK_TARGET_PATH, cv2.IMREAD_UNCHANGED)
+    if img is None:
+        raise FileNotFoundError(f"Could not find blank target template at {BLANK_TARGET_PATH}")
+    if img.shape[2] == 4:
+        # flatten transparency onto white so it saves cleanly as a jpg
+        bgr = img[:, :, :3].astype(np.float32)
+        alpha = img[:, :, 3:4].astype(np.float32) / 255.0
+        white_bg = np.full_like(bgr, 255)
+        img = (bgr * alpha + white_bg * (1 - alpha)).astype(np.uint8)
+    return img
+
+def create_shot_overlay(shot_offsets_mm, output_path="scored_overlay.jpg"):
+    """shot_offsets_mm: list of (dx_mm, dy_mm) per shot, relative to its own
+    target's bull center. Plots them all onto the blank target template."""
+    img = _load_blank_target()
+    cx, cy = BLANK_TARGET_CENTER
+    shot_radius_px = max(3, int(PELLET_RADIUS_MM * BLANK_TARGET_PX_PER_MM))
+
+    for (dx_mm, dy_mm) in shot_offsets_mm:
+        if dx_mm is None or dy_mm is None:
+            continue
+
+        dist_mm = np.hypot(dx_mm, dy_mm)
+        # Real target scoring goes by the edge of the bullet hole nearest
+        # center, not the hole's center point - pull the plotted point in by
+        # the pellet radius so it lands in the same ring as the computed score.
+        if dist_mm > PELLET_RADIUS_MM:
+            scale = (dist_mm - PELLET_RADIUS_MM) / dist_mm
+            dx_eff, dy_eff = dx_mm * scale, dy_mm * scale
+        else:
+            dx_eff, dy_eff = 0.0, 0.0
+
+        px = int(round(cx + dx_eff * BLANK_TARGET_PX_PER_MM))
+        py = int(round(cy + dy_eff * BLANK_TARGET_PX_PER_MM))
+
+        cv2.circle(img, (px, py), shot_radius_px, (180, 120, 60), -1)
+        cv2.circle(img, (px, py), shot_radius_px, (100, 60, 20), 2)
+
+    cv2.imwrite(output_path, img)
+    return img
+
+
+def analyze_orion_target(image_path, output_path="scored_output_warped.jpg", overlay_output_path="scored_overlay.jpg", debug=False, debug_prefix=""):
     raw_img = cv2.imread(image_path)
     if raw_img is None:
         raise FileNotFoundError(f"Could not open image at {image_path}")
@@ -243,6 +292,7 @@ def analyze_orion_target(image_path, output_path="scored_output_warped.jpg", deb
 
     scores = []
     distances_mm = []
+    shot_offsets_mm = []
 
     targets_to_score = ordered_targets[:10]
 
@@ -282,10 +332,14 @@ def analyze_orion_target(image_path, output_path="scored_output_warped.jpg", deb
         if hx is not None:
             x1, y1 = offset_coords
             shot_center_global = (x1 + hx, y1 + hy)
-            dist_px = np.sqrt((hx - (tx - x1))**2 + (hy - (ty - y1))**2)
+            dx_px = hx - (tx - x1)
+            dy_px = hy - (ty - y1)
+            dist_px = np.hypot(dx_px, dy_px)
 
             mm_per_px = 30.5 / (r * 2)
             dist_mm = dist_px * mm_per_px
+            dx_mm = dx_px * mm_per_px
+            dy_mm = dy_px * mm_per_px
 
             score = 10.9 - (dist_mm * 0.4)
             score = round(max(0.0, min(10.9, score)), 1)
@@ -298,10 +352,12 @@ def analyze_orion_target(image_path, output_path="scored_output_warped.jpg", deb
         else:
             score = 0.0
             dist_mm = 0.0
+            dx_mm = dy_mm = None
             label_text = f"#{idx}: {score:.1f}"
 
         scores.append(score)
         distances_mm.append(round(dist_mm, 2))
+        shot_offsets_mm.append((dx_mm, dy_mm))
 
         cv2.putText(img, label_text, (tx - r - 10, ty - r - 8),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
@@ -309,4 +365,7 @@ def analyze_orion_target(image_path, output_path="scored_output_warped.jpg", deb
 
     total_score = round(sum(scores), 1)
     cv2.imwrite(output_path, img)
+
+    create_shot_overlay(shot_offsets_mm, overlay_output_path)
+
     return scores, distances_mm, total_score
