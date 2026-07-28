@@ -206,18 +206,12 @@ def create_shot_overlay(shot_offsets_mm, output_path="scored_overlay.jpg"):
         if dx_mm is None or dy_mm is None:
             continue
 
-        dist_mm = np.hypot(dx_mm, dy_mm)
-        # Real target scoring goes by the edge of the bullet hole nearest
-        # center, not the hole's center point - pull the plotted point in by
-        # the pellet radius so it lands in the same ring as the computed score.
-        if dist_mm > PELLET_RADIUS_MM:
-            scale = (dist_mm - PELLET_RADIUS_MM) / dist_mm
-            dx_eff, dy_eff = dx_mm * scale, dy_mm * scale
-        else:
-            dx_eff, dy_eff = 0.0, 0.0
-
-        px = int(round(cx + dx_eff * BLANK_TARGET_PX_PER_MM))
-        py = int(round(cy + dy_eff * BLANK_TARGET_PX_PER_MM))
+        # Plot the same raw hole-center-to-bull-center offset that the score
+        # itself is computed from (see analyze_orion_target below), so a shot's
+        # position here always matches the distance that produced its score
+        # and matches the dotted line drawn on that shot's individual crop.
+        px = int(round(cx + dx_mm * BLANK_TARGET_PX_PER_MM))
+        py = int(round(cy + dy_mm * BLANK_TARGET_PX_PER_MM))
 
         cv2.circle(img, (px, py), shot_radius_px, (180, 120, 60), -1)
         cv2.circle(img, (px, py), shot_radius_px, (100, 60, 20), 2)
