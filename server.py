@@ -49,24 +49,6 @@ HTML_CONTENT = """
             color: var(--ink);
             background: var(--paper);
             padding: 32px 16px;
-            position: relative;
-            overflow-x: hidden;
-        }
-        body::before {
-            content: "";
-            position: absolute;
-            top: -120px; right: -120px;
-            width: 420px; height: 420px;
-            border-radius: 50%;
-            background:
-              repeating-radial-gradient(circle at center,
-                transparent 0 26px,
-                rgba(52,59,65,0.06) 26px 28px,
-                transparent 28px 54px,
-                rgba(52,59,65,0.06) 54px 56px,
-                transparent 56px 82px,
-                rgba(52,59,65,0.06) 82px 84px);
-            pointer-events: none;
         }
         .card {
             position: relative;
