@@ -24,64 +24,168 @@ HTML_CONTENT = """
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta name="apple-mobile-web-app-title" content="Target Scanner">
-    <meta name="theme-color" content="#007aff">
+    <meta name="theme-color" content="#343B41">
+
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Oswald:wght@400;500;600&family=Inter:wght@400;500&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
 
     <style>
-        body { font-family: -apple-system, sans-serif; text-align: center; padding: 20px; background: #f4f4f9; }
-        .card { background: white; border-radius: 12px; padding: 20px; box-shadow: 0 4px 10px rgba(0,0,0,0.1); max-width: 500px; margin: auto; }
-        
-        /* Watermark styling */
-        .watermark {
+        :root{
+            --paper:#F5F1E6;
+            --paper-edge:#E4DEC9;
+            --ink:#22262A;
+            --ink-soft:#6B6F62;
+            --gunmetal:#343B41;
+            --gunmetal-deep:#262B2F;
+            --brass:#B08541;
+            --brass-deep:#8C6830;
+        }
+        *{ box-sizing: border-box; }
+        body {
+            margin: 0;
+            min-height: 100vh;
+            font-family: 'Inter', sans-serif;
+            color: var(--ink);
+            background: var(--paper);
+            padding: 32px 16px;
+            position: relative;
+            overflow-x: hidden;
+        }
+        body::before {
+            content: "";
             position: absolute;
-            top: 15px;
-            right: 20px;
-            color: #b0b0b0; /* Faded gray */
-            font-size: 12px;
-            font-weight: 500;
-            user-select: none;
+            top: -120px; right: -120px;
+            width: 420px; height: 420px;
+            border-radius: 50%;
+            background:
+              repeating-radial-gradient(circle at center,
+                transparent 0 26px,
+                rgba(52,59,65,0.06) 26px 28px,
+                transparent 28px 54px,
+                rgba(52,59,65,0.06) 54px 56px,
+                transparent 56px 82px,
+                rgba(52,59,65,0.06) 82px 84px);
             pointer-events: none;
         }
+        .card {
+            position: relative;
+            background: white;
+            border: 1px solid var(--paper-edge);
+            border-radius: 14px;
+            padding: 28px 26px 22px;
+            box-shadow: 0 10px 30px rgba(34,38,42,0.08);
+            max-width: 480px;
+            margin: auto;
+        }
 
-        button { background: #007aff; color: white; border: none; padding: 14px 24px; font-size: 16px; font-weight: bold; border-radius: 8px; cursor: pointer; margin-top: 15px; }
+        .eyebrow { display: flex; align-items: center; gap: 10px; margin-bottom: 18px; }
+        .eyebrow-label { font-family: 'Oswald', sans-serif; font-weight: 600; font-size: 12px; letter-spacing: .18em; color: var(--brass-deep); }
+        .eyebrow-rule { flex: 1; height: 1px; background: var(--paper-edge); }
+
+        h1 { font-family: 'Oswald', sans-serif; font-weight: 600; font-size: 26px; margin: 0 0 6px; letter-spacing: .01em; }
+        .lede { margin: 0 0 22px; color: var(--ink-soft); font-size: 14.5px; line-height: 1.5; }
+
+        .capture-zone { position: relative; padding: 26px 14px; margin-bottom: 8px; }
+        .bracket { position: absolute; width: 20px; height: 20px; border-color: var(--brass); border-style: solid; opacity: .55; }
+        .tl { top: 0; left: 0; border-width: 2px 0 0 2px; }
+        .tr { top: 0; right: 0; border-width: 2px 2px 0 0; }
+        .bl { bottom: 0; left: 0; border-width: 0 0 2px 2px; }
+        .br { bottom: 0; right: 0; border-width: 0 2px 2px 0; }
+
+        button.snap-btn {
+            display: block; width: 100%;
+            background: var(--brass); color: white; border: none;
+            padding: 14px; font-family: 'Inter', sans-serif; font-weight: 500; font-size: 15.5px;
+            border-radius: 8px; cursor: pointer; transition: background .15s ease;
+        }
+        button.snap-btn:hover { background: var(--brass-deep); }
+        button.snap-btn:focus-visible { outline: 2px solid var(--gunmetal); outline-offset: 2px; }
+
         input[type="file"] { display: none; }
-        #results { margin-top: 20px; text-align: left; }
-        img { width: 100%; border-radius: 8px; margin-top: 15px; }
-        .score-row { display: flex; justify-content: space-between; border-bottom: 1px solid #eee; padding: 8px 0; }
-        .total { font-size: 20px; font-weight: bold; color: #2c3e50; margin-top: 15px; text-align: center; }
+
+        #loading { display: none; text-align: center; font-size: 13.5px; color: var(--ink-soft); margin-top: 14px; }
+
+        #results { margin-top: 20px; }
+        #results h3 { font-family: 'Oswald', sans-serif; font-size: 13px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-soft); margin: 0 0 10px; font-weight: 500; }
+
+        .score-row {
+            display: grid; grid-template-columns: 26px 1fr auto;
+            align-items: center; gap: 10px; padding: 9px 0;
+            border-bottom: 1px solid var(--paper-edge);
+        }
+        .idx {
+            width: 22px; height: 22px; border-radius: 50%;
+            background: var(--paper); border: 1px solid var(--paper-edge);
+            display: flex; align-items: center; justify-content: center;
+            font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--ink-soft);
+        }
+        .row-label { font-size: 14px; }
+        .row-figures { text-align: right; font-family: 'IBM Plex Mono', monospace; }
+        .row-score { font-size: 15px; font-weight: 500; display: block; }
+        .row-dist { font-size: 11.5px; color: var(--ink-soft); border-bottom: 1px dotted var(--brass); padding-bottom: 1px; }
+
+        .total-panel {
+            margin-top: 16px; background: var(--gunmetal); border-radius: 10px;
+            padding: 14px 18px; display: flex; justify-content: space-between; align-items: baseline;
+        }
+        .total-label { font-family: 'Oswald', sans-serif; font-size: 11px; letter-spacing: .14em; text-transform: uppercase; color: #c9cdd1; }
+        .total-value { font-family: 'IBM Plex Mono', monospace; font-size: 24px; font-weight: 500; color: white; }
+
+        .photo-frame { margin-top: 22px; }
+        .photo-caption { font-family: 'Oswald', sans-serif; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-soft); margin: 0 0 6px; font-weight: 500; }
+        img { width: 100%; border-radius: 8px; border: 1px solid var(--paper-edge); display: block; }
+
+        .credit { margin-top: 22px; text-align: center; font-size: 11px; color: var(--ink-soft); opacity: .7; }
     </style>
 </head>
 <body>
-    <div class="card" style="position: relative;">
-        
-        <div class="watermark">&copy; Mengde Lin</div>
+    <div class="card">
+        <div class="eyebrow">
+            <span class="eyebrow-label">ORION</span>
+            <span class="eyebrow-rule"></span>
+        </div>
 
-        <h2>Orion Target Scanner</h2>
-        <p>Take a photo of your 10m target sheet to calculate scores.</p>
-        
-        <label for="cameraInput">
-            <button onclick="document.getElementById('cameraInput').click()">Snap Target Photo</button>
-        </label>
-        <input type="file" id="cameraInput" accept="image/*" capture="environment" onchange="uploadImage()">
-        
-        <div id="loading" style="display:none; margin-top:15px;">Analyzing target...</div>
-        
+        <h1>Target scanner</h1>
+        <p class="lede">Photograph your 10m target sheet to score it instantly.</p>
+
+        <div class="capture-zone">
+            <div class="bracket tl"></div>
+            <div class="bracket tr"></div>
+            <div class="bracket bl"></div>
+            <div class="bracket br"></div>
+            <label for="cameraInput">
+                <button class="snap-btn" onclick="document.getElementById('cameraInput').click()">Snap target photo</button>
+            </label>
+            <input type="file" id="cameraInput" accept="image/*" capture="environment" onchange="uploadImage()">
+        </div>
+
+        <div id="loading">Reading target&hellip;</div>
+
         <div id="results"></div>
-        <img id="scoredImage" style="display:none;" />
 
-        <h3 id="overlayHeading" style="display:none; margin-top:20px;">All Shots Overlay</h3>
-        <img id="overlayImage" style="display:none;" />
+        <div class="photo-frame" id="scoredFrame" style="display:none;">
+            <p class="photo-caption">Scored target</p>
+            <img id="scoredImage" />
+        </div>
+
+        <div class="photo-frame" id="overlayFrame" style="display:none;">
+            <p class="photo-caption">All shots overlay</p>
+            <img id="overlayImage" />
+        </div>
+
+        <p class="credit">&copy; Mengde Lin</p>
     </div>
 
     <script>
         async function uploadImage() {
             const input = document.getElementById('cameraInput');
             if (!input.files[0]) return;
-            
+
             document.getElementById('loading').style.display = 'block';
             document.getElementById('results').innerHTML = '';
-            document.getElementById('scoredImage').style.display = 'none';
-            document.getElementById('overlayHeading').style.display = 'none';
-            document.getElementById('overlayImage').style.display = 'none';
+            document.getElementById('scoredFrame').style.display = 'none';
+            document.getElementById('overlayFrame').style.display = 'none';
 
             const formData = new FormData();
             formData.append('file', input.files[0]);
@@ -89,7 +193,7 @@ HTML_CONTENT = """
             try {
                 const response = await fetch('/scan', { method: 'POST', body: formData });
                 const data = await response.json();
-                
+
                 document.getElementById('loading').style.display = 'none';
 
                 if (data.error) {
@@ -97,28 +201,31 @@ HTML_CONTENT = """
                     return;
                 }
 
-                let html = '<h3>Target Scores</h3>';
+                let html = '<h3>Your scores</h3>';
                 data.scores.forEach((score, idx) => {
-                    // Ensures the JS side formats clean integers with .0 as well
                     const formattedScore = Number.isInteger(score) ? score.toFixed(1) : score;
-                    html += `<div class="score-row"><span>Target #${idx + 1}</span><span><b>${formattedScore}</b> (${data.distances[idx]} mm)</span></div>`;
+                    html += `<div class="score-row">
+                        <span class="idx">${idx + 1}</span>
+                        <span class="row-label">Target #${idx + 1}</span>
+                        <span class="row-figures">
+                            <span class="row-score">${formattedScore}</span>
+                            <span class="row-dist">${data.distances[idx]} mm</span>
+                        </span>
+                    </div>`;
                 });
-                
+
                 const formattedTotal = Number.isInteger(data.total_score) ? data.total_score.toFixed(1) : data.total_score;
-                
-                // REMOVED the " / 109.0" string from this line
-                html += `<div class="total">Total Score: ${formattedTotal}</div>`;
-                
+                html += `<div class="total-panel"><span class="total-label">Total score</span><span class="total-value">${formattedTotal}</span></div>`;
+
                 document.getElementById('results').innerHTML = html;
-                
+
                 const img = document.getElementById('scoredImage');
                 img.src = 'data:image/jpeg;base64,' + data.image_base64;
-                img.style.display = 'block';
+                document.getElementById('scoredFrame').style.display = 'block';
 
-                document.getElementById('overlayHeading').style.display = 'block';
                 const overlayImg = document.getElementById('overlayImage');
                 overlayImg.src = 'data:image/jpeg;base64,' + data.overlay_image_base64;
-                overlayImg.style.display = 'block';
+                document.getElementById('overlayFrame').style.display = 'block';
 
             } catch (err) {
                 document.getElementById('loading').style.display = 'none';
@@ -149,17 +256,17 @@ async def scan_target_endpoint(file: UploadFile = File(...)):
         contents = await file.read()
         with open(temp_filename, "wb") as f:
             f.write(contents)
-        
+
         output_filename = "scored_mobile_output.jpg"
         overlay_filename = "scored_overlay.jpg"
         scores, distances, total_score = analyze_orion_target(temp_filename, output_filename, overlay_filename)
-        
+
         with open(output_filename, "rb") as f:
             encoded_img = base64.b64encode(f.read()).decode('utf-8')
 
         with open(overlay_filename, "rb") as f:
             overlay_encoded = base64.b64encode(f.read()).decode('utf-8')
-            
+
         return {
             "scores": scores,
             "distances": distances,

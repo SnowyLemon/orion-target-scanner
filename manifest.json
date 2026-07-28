@@ -3,8 +3,8 @@
   "short_name": "Target Scanner",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#f4f4f9",
-  "theme_color": "#007aff",
+  "background_color": "#F5F1E6",
+  "theme_color": "#343B41",
   "icons": [
     { "src": "/static/icon-192.png", "sizes": "192x192", "type": "image/png" },
     { "src": "/static/icon-512.png", "sizes": "512x512", "type": "image/png" }
