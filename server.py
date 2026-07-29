@@ -84,6 +84,15 @@ HTML_CONTENT = """
         button.snap-btn:hover { background: var(--brass-deep); }
         button.snap-btn:focus-visible { outline: 2px solid var(--gunmetal); outline-offset: 2px; }
 
+        button.save-btn {
+            display: block; width: 100%;
+            background: none; color: var(--gunmetal); border: 1px solid var(--paper-edge);
+            padding: 10px; font-family: 'Inter', sans-serif; font-weight: 500; font-size: 13.5px;
+            border-radius: 8px; cursor: pointer; margin-top: 10px; transition: background .15s ease;
+        }
+        button.save-btn:hover { background: var(--paper); }
+        button.save-btn:focus-visible { outline: 2px solid var(--gunmetal); outline-offset: 2px; }
+
         input[type="file"] { display: none; }
 
         #loading { display: none; text-align: center; font-size: 13.5px; color: var(--ink-soft); margin-top: 14px; }
@@ -149,11 +158,13 @@ HTML_CONTENT = """
         <div class="photo-frame" id="scoredFrame" style="display:none;">
             <p class="photo-caption">Scored target</p>
             <img id="scoredImage" />
+            <button class="save-btn" onclick="saveImage('scoredImage', 'scored-target.jpg')">Save Score</button>
         </div>
 
         <div class="photo-frame" id="overlayFrame" style="display:none;">
             <p class="photo-caption">All shots overlay</p>
             <img id="overlayImage" />
+            <button class="save-btn" onclick="saveImage('overlayImage', 'shots-overlay.jpg')">Save Overlay</button>
         </div>
 
         <p class="credit">&copy; Mengde Lin</p>
@@ -213,6 +224,36 @@ HTML_CONTENT = """
                 document.getElementById('loading').style.display = 'none';
                 alert('Upload failed: ' + err);
             }
+        }
+
+        async function saveImage(imgElementId, filename) {
+            const img = document.getElementById(imgElementId);
+            const dataUrl = img.src;
+
+            const res = await fetch(dataUrl);
+            const blob = await res.blob();
+            const file = new File([blob], filename, { type: blob.type });
+
+            // Prefer the native share sheet when files can be shared - this is what
+            // makes "save to Photos" actually work reliably on iOS.
+            if (navigator.canShare && navigator.canShare({ files: [file] })) {
+                try {
+                    await navigator.share({ files: [file], title: filename });
+                    return;
+                } catch (err) {
+                    if (err.name === 'AbortError') return; // user dismissed the share sheet
+                    // otherwise fall through to the download-link approach below
+                }
+            }
+
+            // Fallback: plain anchor download (desktop browsers, Android Chrome).
+            const link = document.createElement('a');
+            link.href = URL.createObjectURL(blob);
+            link.download = filename;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            URL.revokeObjectURL(link.href);
         }
     </script>
 </body>
