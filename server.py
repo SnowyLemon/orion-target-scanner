@@ -288,7 +288,7 @@ async def scan_target_endpoint(file: UploadFile = File(...)):
         # request couldn't make any progress until the first one finished.
         # asyncio.to_thread runs it in a worker thread instead, letting
         # multiple scans actually run concurrently.
-        scores, distances, total_score = await asyncio.to_thread(
+        scores, distances, total_score, extreme_spread_mm = await asyncio.to_thread(
             analyze_orion_target, temp_filename, output_filename, overlay_filename
         )
 
@@ -302,6 +302,7 @@ async def scan_target_endpoint(file: UploadFile = File(...)):
             "scores": scores,
             "distances": distances,
             "total_score": total_score,
+            "extreme_spread_mm": extreme_spread_mm,
             "image_base64": encoded_img,
             "overlay_image_base64": overlay_encoded
         }
