@@ -172,55 +172,69 @@ def find_shot_hole(gray, tx, ty, r, search_radius, use_shift=True, debug_tag=Non
 
     return hx, hy, (x1, y1)
 
+def generate_spread_overlay(shot_offsets, output_path, bull_diameter_mm=30.5, canvas_size=900):
+    """
+    Renders every shot on one common target diagram, positioned by its own
+    (dx_mm, dy_mm) offset from its bull center. This lets the shooter see
+    the overall group / spread regardless of which of the 10 bulls each
+    shot was fired at.
 
-BLANK_TARGET_PATH = "static/blank_target.png"
-BLANK_TARGET_CENTER = (616, 612)   # measured center of the ring diagram, in px
-# The diagram's solid black region ends at r=379.5px (measured). Scoring elsewhere
-# in this file assumes the black bull is 30.5mm in diameter (mm_per_px = 30.5/(r*2)),
-# i.e. a 15.25mm radius. Anchoring the diagram's black edge to that same 15.25mm
-# keeps "inside/outside the black" on this overlay consistent with what's actually
-# used to compute each shot's score.
-BLANK_TARGET_PX_PER_MM = 379.5 / 15.25
-PELLET_RADIUS_MM = 2.25            # 4.5mm pellet diameter, same assumption used in find_shot_hole
+    shot_offsets: list of (idx, dx_mm, dy_mm, score) for shots that were
+                  successfully located. Misses (no located hole) are
+                  simply omitted from the plot.
+    """
+    canvas = np.full((canvas_size, canvas_size, 3), 255, dtype=np.uint8)
+    center = (canvas_size // 2, canvas_size // 2)
 
-def _load_blank_target():
-    img = cv2.imread(BLANK_TARGET_PATH, cv2.IMREAD_UNCHANGED)
-    if img is None:
-        raise FileNotFoundError(f"Could not find blank target template at {BLANK_TARGET_PATH}")
-    if img.shape[2] == 4:
-        # flatten transparency onto white so it saves cleanly as a jpg
-        bgr = img[:, :, :3].astype(np.float32)
-        alpha = img[:, :, 3:4].astype(np.float32) / 255.0
-        white_bg = np.full_like(bgr, 255)
-        img = (bgr * alpha + white_bg * (1 - alpha)).astype(np.uint8)
-    return img
+    if shot_offsets:
+        max_extent = max(1.0, max(max(abs(dx), abs(dy)) for (_, dx, dy, _) in shot_offsets))
+    else:
+        max_extent = 1.0
 
-def create_shot_overlay(shot_offsets_mm, output_path="scored_overlay.jpg"):
-    """shot_offsets_mm: list of (dx_mm, dy_mm) per shot, relative to its own
-    target's bull center. Plots them all onto the blank target template."""
-    img = _load_blank_target()
-    cx, cy = BLANK_TARGET_CENTER
-    shot_radius_px = max(3, int(PELLET_RADIUS_MM * BLANK_TARGET_PX_PER_MM))
+    margin_px = 70
+    usable_half = (canvas_size / 2) - margin_px
+    px_per_mm = usable_half / (max_extent * 1.35)
+    px_per_mm = max(4.0, min(px_per_mm, 45.0))
 
-    for (dx_mm, dy_mm) in shot_offsets_mm:
-        if dx_mm is None or dy_mm is None:
-            continue
+    # Concentric reference rings every 5mm, plus the bull itself
+    ring_step_mm = 5
+    max_ring_mm = int(np.ceil((usable_half / px_per_mm) / ring_step_mm) * ring_step_mm)
+    for ring_mm in range(ring_step_mm, max_ring_mm + 1, ring_step_mm):
+        cv2.circle(canvas, center, int(ring_mm * px_per_mm), (225, 225, 225), 1, lineType=cv2.LINE_AA)
 
-        # Plot the same raw hole-center-to-bull-center offset that the score
-        # itself is computed from (see analyze_orion_target below), so a shot's
-        # position here always matches the distance that produced its score
-        # and matches the dotted line drawn on that shot's individual crop.
-        px = int(round(cx + dx_mm * BLANK_TARGET_PX_PER_MM))
-        py = int(round(cy + dy_mm * BLANK_TARGET_PX_PER_MM))
+    bull_radius_px = int((bull_diameter_mm / 2) * px_per_mm)
+    cv2.circle(canvas, center, bull_radius_px, (60, 60, 60), 2, lineType=cv2.LINE_AA)
 
-        cv2.circle(img, (px, py), shot_radius_px, (180, 120, 60), -1)
-        cv2.circle(img, (px, py), shot_radius_px, (100, 60, 20), 2)
+    usable_half_int = int(usable_half)
+    cv2.line(canvas, (center[0] - usable_half_int, center[1]), (center[0] + usable_half_int, center[1]), (235, 235, 235), 1)
+    cv2.line(canvas, (center[0], center[1] - usable_half_int), (center[0], center[1] + usable_half_int), (235, 235, 235), 1)
 
-    cv2.imwrite(output_path, img)
-    return img
+    points = []
+    for (idx, dx_mm, dy_mm, score) in shot_offsets:
+        px = int(center[0] + dx_mm * px_per_mm)
+        py = int(center[1] + dy_mm * px_per_mm)
+        points.append((px, py))
+        cv2.circle(canvas, (px, py), 7, (0, 0, 255), -1, lineType=cv2.LINE_AA)
+        cv2.circle(canvas, (px, py), 7, (0, 0, 0), 1, lineType=cv2.LINE_AA)
+        cv2.putText(canvas, str(idx), (px + 9, py - 9), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 2, lineType=cv2.LINE_AA)
 
+    extreme_spread_mm = 0.0
+    if len(points) >= 2:
+        max_d_px = 0.0
+        for i in range(len(points)):
+            for j in range(i + 1, len(points)):
+                d = np.hypot(points[i][0] - points[j][0], points[i][1] - points[j][1])
+                if d > max_d_px:
+                    max_d_px = d
+        extreme_spread_mm = round(max_d_px / px_per_mm, 2)
 
-def analyze_orion_target(image_path, output_path="scored_output_warped.jpg", overlay_output_path="scored_overlay.jpg", debug=False, debug_prefix=""):
+    caption = f"Extreme Spread: {extreme_spread_mm:.2f} mm" if points else "No shots located"
+    cv2.putText(canvas, caption, (20, canvas_size - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (40, 40, 40), 2, lineType=cv2.LINE_AA)
+
+    cv2.imwrite(output_path, canvas)
+    return extreme_spread_mm
+
+def analyze_orion_target(image_path, output_path="scored_output_warped.jpg", overlay_path="scored_spread_overlay.jpg", debug=False, debug_prefix=""):
     raw_img = cv2.imread(image_path)
     if raw_img is None:
         raise FileNotFoundError(f"Could not open image at {image_path}")
@@ -291,7 +305,7 @@ def analyze_orion_target(image_path, output_path="scored_output_warped.jpg", ove
 
     scores = []
     distances_mm = []
-    shot_offsets_mm = []
+    shot_offsets = []
 
     targets_to_score = ordered_targets[:10]
 
@@ -331,14 +345,10 @@ def analyze_orion_target(image_path, output_path="scored_output_warped.jpg", ove
         if hx is not None:
             x1, y1 = offset_coords
             shot_center_global = (x1 + hx, y1 + hy)
-            dx_px = hx - (tx - x1)
-            dy_px = hy - (ty - y1)
-            dist_px = np.hypot(dx_px, dy_px)
+            dist_px = np.sqrt((hx - (tx - x1))**2 + (hy - (ty - y1))**2)
 
             mm_per_px = 30.5 / (r * 2)
             dist_mm = dist_px * mm_per_px
-            dx_mm = dx_px * mm_per_px
-            dy_mm = dy_px * mm_per_px
 
             score = 10.9 - (dist_mm * 0.4)
             score = round(max(0.0, min(10.9, score)), 1)
@@ -347,28 +357,26 @@ def analyze_orion_target(image_path, output_path="scored_output_warped.jpg", ove
             cv2.circle(img, target_center_global, 3, (255, 255, 0), -1)
             cv2.circle(img, shot_center_global, 4, (0, 0, 255), -1)
 
+            dx_mm = (shot_center_global[0] - target_center_global[0]) * mm_per_px
+            dy_mm = (shot_center_global[1] - target_center_global[1]) * mm_per_px
+            shot_offsets.append((idx, dx_mm, dy_mm, score))
+
             label_text = f"#{idx}: {score:.1f} ({dist_mm:.2f}mm)"
         else:
             score = 0.0
             dist_mm = 0.0
-            dx_mm = dy_mm = None
             label_text = f"#{idx}: {score:.1f}"
 
         scores.append(score)
         distances_mm.append(round(dist_mm, 2))
-        shot_offsets_mm.append((dx_mm, dy_mm))
 
-        label_pos = (tx - r - 10, ty - r - 8)
-        # white outline first for contrast against any background, then navy fill on top
-        cv2.putText(img, label_text, label_pos,
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 4, cv2.LINE_AA)
-        cv2.putText(img, label_text, label_pos,
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (128, 0, 0), 1, cv2.LINE_AA)
+        cv2.putText(img, label_text, (tx - r - 10, ty - r - 8),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
         cv2.circle(img, (tx, ty), r, (255, 0, 0), 2)
 
     total_score = round(sum(scores), 1)
     cv2.imwrite(output_path, img)
 
-    create_shot_overlay(shot_offsets_mm, overlay_output_path)
+    extreme_spread_mm = generate_spread_overlay(shot_offsets, overlay_path)
 
-    return scores, distances_mm, total_score
+    return scores, distances_mm, total_score, extreme_spread_mm

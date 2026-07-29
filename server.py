@@ -124,6 +124,19 @@ HTML_CONTENT = """
         .photo-caption { font-family: 'Oswald', sans-serif; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-soft); margin: 0 0 6px; font-weight: 500; }
         img { width: 100%; border-radius: 8px; border: 1px solid var(--paper-edge); display: block; }
 
+        button.save-btn {
+            display: inline-flex; align-items: center; gap: 6px;
+            margin-top: 10px;
+            background: transparent; color: var(--brass-deep);
+            border: 1px solid var(--brass); border-radius: 20px;
+            padding: 7px 16px;
+            font-family: 'Oswald', sans-serif; font-weight: 500; font-size: 11px;
+            letter-spacing: .08em; text-transform: uppercase;
+            cursor: pointer; transition: background .15s ease, color .15s ease;
+        }
+        button.save-btn:hover { background: var(--brass); color: white; }
+        button.save-btn:focus-visible { outline: 2px solid var(--gunmetal); outline-offset: 2px; }
+
         .credit { margin-top: 22px; text-align: center; font-size: 11px; color: var(--ink-soft); opacity: .7; }
     </style>
 </head>
@@ -155,17 +168,30 @@ HTML_CONTENT = """
         <div class="photo-frame" id="scoredFrame" style="display:none;">
             <p class="photo-caption">Scored target</p>
             <img id="scoredImage" />
+            <button class="save-btn" onclick="downloadImage('scoredImage', 'target_score.jpg')">Save score</button>
         </div>
 
         <div class="photo-frame" id="overlayFrame" style="display:none;">
             <p class="photo-caption">All shots overlay</p>
             <img id="overlayImage" />
+            <button class="save-btn" onclick="downloadImage('overlayImage', 'shot_overlay.jpg')">Save overlay</button>
         </div>
 
         <p class="credit">&copy; Mengde Lin</p>
     </div>
 
     <script>
+        function downloadImage(imgElementId, filename) {
+            const img = document.getElementById(imgElementId);
+            if (!img || !img.src) return;
+            const link = document.createElement('a');
+            link.href = img.src;
+            link.download = filename;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+        }
+
         async function uploadImage() {
             const input = document.getElementById('cameraInput');
             if (!input.files[0]) return;
