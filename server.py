@@ -226,6 +226,12 @@ HTML_CONTENT = """
             }
         }
 
+        function isIOS() {
+            // Covers iPhone/iPad Safari and iPadOS 13+ (which reports as Mac but has touch support).
+            return /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+                (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+        }
+
         async function saveImage(imgElementId, filename) {
             const img = document.getElementById(imgElementId);
             const dataUrl = img.src;
@@ -233,7 +239,22 @@ HTML_CONTENT = """
             const res = await fetch(dataUrl);
             const blob = await res.blob();
 
-            // Plain anchor download - triggers a direct file save, no share sheet.
+            if (isIOS()) {
+                // On iOS, especially as a home-screen app, a plain download link
+                // does nothing reliable - there's no browser chrome to catch it.
+                // The share sheet is the only dependable way to save to Photos.
+                const file = new File([blob], filename, { type: blob.type });
+                if (navigator.canShare && navigator.canShare({ files: [file] })) {
+                    try {
+                        await navigator.share({ files: [file], title: filename });
+                    } catch (err) {
+                        // AbortError just means the user dismissed the share sheet - fine.
+                    }
+                    return;
+                }
+            }
+
+            // Desktop / Android: plain anchor download, no share sheet.
             const link = document.createElement('a');
             link.href = URL.createObjectURL(blob);
             link.download = filename;
