@@ -5,7 +5,7 @@ import os
 import uuid
 import asyncio
 import uvicorn
-from fastapi import FastAPI, File, UploadFile
+from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -184,8 +184,8 @@ HTML_CONTENT = """
 
                 document.getElementById('loading').style.display = 'none';
 
-                if (data.error) {
-                    alert('Error processing image: ' + data.error);
+                if (!response.ok) {
+                    alert('Error processing image: ' + (data.detail || 'Unknown error'));
                     return;
                 }
 
@@ -239,6 +239,9 @@ def ping():
 
 @app.post("/scan")
 async def scan_target_endpoint(file: UploadFile = File(...)):
+    if not file.content_type or not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="Uploaded file must be an image.")
+
     # Unique per-request filenames so concurrent uploads never read/write
     # each other's in-progress files.
     request_id = uuid.uuid4().hex
@@ -248,6 +251,9 @@ async def scan_target_endpoint(file: UploadFile = File(...)):
 
     try:
         contents = await file.read()
+        if not contents:
+            raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+
         with open(temp_filename, "wb") as f:
             f.write(contents)
 
@@ -273,8 +279,15 @@ async def scan_target_endpoint(file: UploadFile = File(...)):
             "image_base64": encoded_img,
             "overlay_image_base64": overlay_encoded
         }
+    except HTTPException:
+        # Already a proper HTTP error (e.g. bad content type/empty file) - just re-raise.
+        raise
+    except FileNotFoundError as e:
+        # e.g. cv2.imread couldn't decode the file, or blank_target.png is missing.
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        return {"error": str(e)}
+        # Anything unexpected in the CV pipeline itself.
+        raise HTTPException(status_code=500, detail=f"Failed to process target image: {e}")
     finally:
         # Clean up this request's temp files regardless of success/failure,
         # so disk usage doesn't grow with every scan.
