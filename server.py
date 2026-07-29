@@ -1,6 +1,8 @@
 import cv2
 import numpy as np
 import base64
+import os
+import uuid
 import uvicorn
 from fastapi import FastAPI, File, UploadFile
 from fastapi.responses import HTMLResponse, FileResponse
@@ -11,6 +13,9 @@ from scan_target import analyze_orion_target
 app = FastAPI()
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
+
+TEMP_DIR = "temp_uploads"
+os.makedirs(TEMP_DIR, exist_ok=True)
 
 HTML_CONTENT = """
 <!DOCTYPE html>
@@ -233,14 +238,18 @@ def ping():
 
 @app.post("/scan")
 async def scan_target_endpoint(file: UploadFile = File(...)):
+    # Unique per-request filenames so concurrent uploads never read/write
+    # each other's in-progress files.
+    request_id = uuid.uuid4().hex
+    temp_filename = os.path.join(TEMP_DIR, f"{request_id}_input.jpg")
+    output_filename = os.path.join(TEMP_DIR, f"{request_id}_output.jpg")
+    overlay_filename = os.path.join(TEMP_DIR, f"{request_id}_overlay.jpg")
+
     try:
-        temp_filename = "temp_mobile_input.jpg"
         contents = await file.read()
         with open(temp_filename, "wb") as f:
             f.write(contents)
 
-        output_filename = "scored_mobile_output.jpg"
-        overlay_filename = "scored_overlay.jpg"
         scores, distances, total_score = analyze_orion_target(temp_filename, output_filename, overlay_filename)
 
         with open(output_filename, "rb") as f:
@@ -258,6 +267,15 @@ async def scan_target_endpoint(file: UploadFile = File(...)):
         }
     except Exception as e:
         return {"error": str(e)}
+    finally:
+        # Clean up this request's temp files regardless of success/failure,
+        # so disk usage doesn't grow with every scan.
+        for path in (temp_filename, output_filename, overlay_filename):
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except OSError:
+                pass
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
