@@ -172,66 +172,71 @@ def find_shot_hole(gray, tx, ty, r, search_radius, use_shift=True, debug_tag=Non
 
     return hx, hy, (x1, y1)
 
-def generate_spread_overlay(shot_offsets, output_path, bull_diameter_mm=30.5, canvas_size=900):
+BLANK_TARGET_PATH = "static/blank_target.png"
+BLANK_TARGET_CENTER = (165, 165)   # measured center of the ring diagram, in px
+BLANK_TARGET_PX_PER_MM = 6.625     # matches the diagram's ring spacing to the score formula
+PELLET_RADIUS_MM = 2.25            # 4.5mm pellet diameter, same assumption used in find_shot_hole above
+
+def _load_blank_target():
+    img = cv2.imread(BLANK_TARGET_PATH, cv2.IMREAD_UNCHANGED)
+    if img is None:
+        raise FileNotFoundError(f"Could not find blank target template at {BLANK_TARGET_PATH}")
+    if img.shape[2] == 4:
+        # flatten transparency onto white so it saves cleanly as a jpg
+        bgr = img[:, :, :3].astype(np.float32)
+        alpha = img[:, :, 3:4].astype(np.float32) / 255.0
+        white_bg = np.full_like(bgr, 255)
+        img = (bgr * alpha + white_bg * (1 - alpha)).astype(np.uint8)
+    return img
+
+def generate_spread_overlay(shot_offsets, output_path="scored_overlay.jpg"):
     """
-    Renders every shot on one common target diagram, positioned by its own
-    (dx_mm, dy_mm) offset from its bull center. This lets the shooter see
-    the overall group / spread regardless of which of the 10 bulls each
-    shot was fired at.
+    Plots every shot on your real target diagram (static/blank_target.png),
+    positioned by its own (dx_mm, dy_mm) offset from its bull center. This
+    lets the shooter see the overall group / spread regardless of which of
+    the 10 bulls each shot was fired at.
 
     shot_offsets: list of (idx, dx_mm, dy_mm, score) for shots that were
                   successfully located. Misses (no located hole) are
                   simply omitted from the plot.
     """
-    canvas = np.full((canvas_size, canvas_size, 3), 255, dtype=np.uint8)
-    center = (canvas_size // 2, canvas_size // 2)
+    img = _load_blank_target()
+    cx, cy = BLANK_TARGET_CENTER
+    shot_radius_px = max(3, int(PELLET_RADIUS_MM * BLANK_TARGET_PX_PER_MM))
 
-    if shot_offsets:
-        max_extent = max(1.0, max(max(abs(dx), abs(dy)) for (_, dx, dy, _) in shot_offsets))
-    else:
-        max_extent = 1.0
-
-    margin_px = 70
-    usable_half = (canvas_size / 2) - margin_px
-    px_per_mm = usable_half / (max_extent * 1.35)
-    px_per_mm = max(4.0, min(px_per_mm, 45.0))
-
-    # Concentric reference rings every 5mm, plus the bull itself
-    ring_step_mm = 5
-    max_ring_mm = int(np.ceil((usable_half / px_per_mm) / ring_step_mm) * ring_step_mm)
-    for ring_mm in range(ring_step_mm, max_ring_mm + 1, ring_step_mm):
-        cv2.circle(canvas, center, int(ring_mm * px_per_mm), (225, 225, 225), 1, lineType=cv2.LINE_AA)
-
-    bull_radius_px = int((bull_diameter_mm / 2) * px_per_mm)
-    cv2.circle(canvas, center, bull_radius_px, (60, 60, 60), 2, lineType=cv2.LINE_AA)
-
-    usable_half_int = int(usable_half)
-    cv2.line(canvas, (center[0] - usable_half_int, center[1]), (center[0] + usable_half_int, center[1]), (235, 235, 235), 1)
-    cv2.line(canvas, (center[0], center[1] - usable_half_int), (center[0], center[1] + usable_half_int), (235, 235, 235), 1)
-
-    points = []
     for (idx, dx_mm, dy_mm, score) in shot_offsets:
-        px = int(center[0] + dx_mm * px_per_mm)
-        py = int(center[1] + dy_mm * px_per_mm)
-        points.append((px, py))
-        cv2.circle(canvas, (px, py), 7, (0, 0, 255), -1, lineType=cv2.LINE_AA)
-        cv2.circle(canvas, (px, py), 7, (0, 0, 0), 1, lineType=cv2.LINE_AA)
-        cv2.putText(canvas, str(idx), (px + 9, py - 9), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 2, lineType=cv2.LINE_AA)
+        dist_mm = np.hypot(dx_mm, dy_mm)
+        # Real target scoring goes by the edge of the bullet hole nearest
+        # center, not the hole's center point - pull the plotted point in by
+        # the pellet radius so it lands in the same ring as the computed score.
+        if dist_mm > PELLET_RADIUS_MM:
+            scale = (dist_mm - PELLET_RADIUS_MM) / dist_mm
+            dx_eff, dy_eff = dx_mm * scale, dy_mm * scale
+        else:
+            dx_eff, dy_eff = 0.0, 0.0
+
+        px = int(round(cx + dx_eff * BLANK_TARGET_PX_PER_MM))
+        py = int(round(cy + dy_eff * BLANK_TARGET_PX_PER_MM))
+
+        cv2.circle(img, (px, py), shot_radius_px, (180, 120, 60), -1)
+        cv2.circle(img, (px, py), shot_radius_px, (100, 60, 20), 2)
+        cv2.putText(img, str(idx), (px + shot_radius_px + 2, py - shot_radius_px),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 1, lineType=cv2.LINE_AA)
 
     extreme_spread_mm = 0.0
-    if len(points) >= 2:
-        max_d_px = 0.0
-        for i in range(len(points)):
-            for j in range(i + 1, len(points)):
-                d = np.hypot(points[i][0] - points[j][0], points[i][1] - points[j][1])
-                if d > max_d_px:
-                    max_d_px = d
-        extreme_spread_mm = round(max_d_px / px_per_mm, 2)
+    if len(shot_offsets) >= 2:
+        max_d_mm = 0.0
+        for i in range(len(shot_offsets)):
+            for j in range(i + 1, len(shot_offsets)):
+                d = np.hypot(shot_offsets[i][1] - shot_offsets[j][1], shot_offsets[i][2] - shot_offsets[j][2])
+                if d > max_d_mm:
+                    max_d_mm = d
+        extreme_spread_mm = round(max_d_mm, 2)
 
-    caption = f"Extreme Spread: {extreme_spread_mm:.2f} mm" if points else "No shots located"
-    cv2.putText(canvas, caption, (20, canvas_size - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (40, 40, 40), 2, lineType=cv2.LINE_AA)
+    caption = f"Extreme Spread: {extreme_spread_mm:.2f} mm" if shot_offsets else "No shots located"
+    cv2.putText(img, caption, (20, img.shape[0] - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (40, 40, 40), 2, lineType=cv2.LINE_AA)
 
-    cv2.imwrite(output_path, canvas)
+    cv2.imwrite(output_path, img)
     return extreme_spread_mm
 
 def analyze_orion_target(image_path, output_path="scored_output_warped.jpg", overlay_path="scored_spread_overlay.jpg", debug=False, debug_prefix=""):
