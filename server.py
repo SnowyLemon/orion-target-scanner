@@ -3,6 +3,7 @@ import numpy as np
 import base64
 import os
 import uuid
+import asyncio
 import uvicorn
 from fastapi import FastAPI, File, UploadFile
 from fastapi.responses import HTMLResponse, FileResponse
@@ -250,7 +251,14 @@ async def scan_target_endpoint(file: UploadFile = File(...)):
         with open(temp_filename, "wb") as f:
             f.write(contents)
 
-        scores, distances, total_score = analyze_orion_target(temp_filename, output_filename, overlay_filename)
+        # analyze_orion_target is synchronous, CPU-bound OpenCV work. Running it
+        # directly here would block the whole event loop, so a second scan
+        # request couldn't make any progress until the first one finished.
+        # asyncio.to_thread runs it in a worker thread instead, letting
+        # multiple scans actually run concurrently.
+        scores, distances, total_score = await asyncio.to_thread(
+            analyze_orion_target, temp_filename, output_filename, overlay_filename
+        )
 
         with open(output_filename, "rb") as f:
             encoded_img = base64.b64encode(f.read()).decode('utf-8')
