@@ -1,11 +1,8 @@
 import cv2
 import numpy as np
 import base64
-import os
-import uuid
-import asyncio
 import uvicorn
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import FastAPI, File, UploadFile
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -14,9 +11,6 @@ from scan_target import analyze_orion_target
 app = FastAPI()
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
-
-TEMP_DIR = "temp_uploads"
-os.makedirs(TEMP_DIR, exist_ok=True)
 
 HTML_CONTENT = """
 <!DOCTYPE html>
@@ -124,19 +118,6 @@ HTML_CONTENT = """
         .photo-caption { font-family: 'Oswald', sans-serif; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-soft); margin: 0 0 6px; font-weight: 500; }
         img { width: 100%; border-radius: 8px; border: 1px solid var(--paper-edge); display: block; }
 
-        button.save-btn {
-            display: inline-flex; align-items: center; gap: 6px;
-            margin-top: 10px;
-            background: transparent; color: var(--brass-deep);
-            border: 1px solid var(--brass); border-radius: 20px;
-            padding: 7px 16px;
-            font-family: 'Oswald', sans-serif; font-weight: 500; font-size: 11px;
-            letter-spacing: .08em; text-transform: uppercase;
-            cursor: pointer; transition: background .15s ease, color .15s ease;
-        }
-        button.save-btn:hover { background: var(--brass); color: white; }
-        button.save-btn:focus-visible { outline: 2px solid var(--gunmetal); outline-offset: 2px; }
-
         .credit { margin-top: 22px; text-align: center; font-size: 11px; color: var(--ink-soft); opacity: .7; }
     </style>
 </head>
@@ -168,30 +149,17 @@ HTML_CONTENT = """
         <div class="photo-frame" id="scoredFrame" style="display:none;">
             <p class="photo-caption">Scored target</p>
             <img id="scoredImage" />
-            <button class="save-btn" onclick="downloadImage('scoredImage', 'target_score.jpg')">Save score</button>
         </div>
 
         <div class="photo-frame" id="overlayFrame" style="display:none;">
             <p class="photo-caption">All shots overlay</p>
             <img id="overlayImage" />
-            <button class="save-btn" onclick="downloadImage('overlayImage', 'shot_overlay.jpg')">Save overlay</button>
         </div>
 
         <p class="credit">&copy; Mengde Lin</p>
     </div>
 
     <script>
-        function downloadImage(imgElementId, filename) {
-            const img = document.getElementById(imgElementId);
-            if (!img || !img.src) return;
-            const link = document.createElement('a');
-            link.href = img.src;
-            link.download = filename;
-            document.body.appendChild(link);
-            link.click();
-            document.body.removeChild(link);
-        }
-
         async function uploadImage() {
             const input = document.getElementById('cameraInput');
             if (!input.files[0]) return;
@@ -210,8 +178,8 @@ HTML_CONTENT = """
 
                 document.getElementById('loading').style.display = 'none';
 
-                if (!response.ok) {
-                    alert('Error processing image: ' + (data.detail || 'Unknown error'));
+                if (data.error) {
+                    alert('Error processing image: ' + data.error);
                     return;
                 }
 
@@ -265,32 +233,15 @@ def ping():
 
 @app.post("/scan")
 async def scan_target_endpoint(file: UploadFile = File(...)):
-    if not file.content_type or not file.content_type.startswith("image/"):
-        raise HTTPException(status_code=400, detail="Uploaded file must be an image.")
-
-    # Unique per-request filenames so concurrent uploads never read/write
-    # each other's in-progress files.
-    request_id = uuid.uuid4().hex
-    temp_filename = os.path.join(TEMP_DIR, f"{request_id}_input.jpg")
-    output_filename = os.path.join(TEMP_DIR, f"{request_id}_output.jpg")
-    overlay_filename = os.path.join(TEMP_DIR, f"{request_id}_overlay.jpg")
-
     try:
+        temp_filename = "temp_mobile_input.jpg"
         contents = await file.read()
-        if not contents:
-            raise HTTPException(status_code=400, detail="Uploaded file is empty.")
-
         with open(temp_filename, "wb") as f:
             f.write(contents)
 
-        # analyze_orion_target is synchronous, CPU-bound OpenCV work. Running it
-        # directly here would block the whole event loop, so a second scan
-        # request couldn't make any progress until the first one finished.
-        # asyncio.to_thread runs it in a worker thread instead, letting
-        # multiple scans actually run concurrently.
-        scores, distances, total_score, extreme_spread_mm = await asyncio.to_thread(
-            analyze_orion_target, temp_filename, output_filename, overlay_filename
-        )
+        output_filename = "scored_mobile_output.jpg"
+        overlay_filename = "scored_overlay.jpg"
+        scores, distances, total_score = analyze_orion_target(temp_filename, output_filename, overlay_filename)
 
         with open(output_filename, "rb") as f:
             encoded_img = base64.b64encode(f.read()).decode('utf-8')
@@ -302,28 +253,11 @@ async def scan_target_endpoint(file: UploadFile = File(...)):
             "scores": scores,
             "distances": distances,
             "total_score": total_score,
-            "extreme_spread_mm": extreme_spread_mm,
             "image_base64": encoded_img,
             "overlay_image_base64": overlay_encoded
         }
-    except HTTPException:
-        # Already a proper HTTP error (e.g. bad content type/empty file) - just re-raise.
-        raise
-    except FileNotFoundError as e:
-        # e.g. cv2.imread couldn't decode the file, or blank_target.png is missing.
-        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        # Anything unexpected in the CV pipeline itself.
-        raise HTTPException(status_code=500, detail=f"Failed to process target image: {e}")
-    finally:
-        # Clean up this request's temp files regardless of success/failure,
-        # so disk usage doesn't grow with every scan.
-        for path in (temp_filename, output_filename, overlay_filename):
-            try:
-                if os.path.exists(path):
-                    os.remove(path)
-            except OSError:
-                pass
+        return {"error": str(e)}
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
