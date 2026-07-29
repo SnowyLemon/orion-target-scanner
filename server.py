@@ -232,21 +232,8 @@ HTML_CONTENT = """
 
             const res = await fetch(dataUrl);
             const blob = await res.blob();
-            const file = new File([blob], filename, { type: blob.type });
 
-            // Prefer the native share sheet when files can be shared - this is what
-            // makes "save to Photos" actually work reliably on iOS.
-            if (navigator.canShare && navigator.canShare({ files: [file] })) {
-                try {
-                    await navigator.share({ files: [file], title: filename });
-                    return;
-                } catch (err) {
-                    if (err.name === 'AbortError') return; // user dismissed the share sheet
-                    // otherwise fall through to the download-link approach below
-                }
-            }
-
-            // Fallback: plain anchor download (desktop browsers, Android Chrome).
+            // Plain anchor download - triggers a direct file save, no share sheet.
             const link = document.createElement('a');
             link.href = URL.createObjectURL(blob);
             link.download = filename;
