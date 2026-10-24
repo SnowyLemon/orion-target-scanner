@@ -1,4 +1,5 @@
 import cv2
+import math
 import numpy as np
 import base64
 import uvicorn
@@ -6,11 +7,24 @@ from fastapi import FastAPI, File, UploadFile
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from scan_target import analyze_orion_target
+from scan_target import analyze_orion_target, create_shot_overlay
 
 app = FastAPI()
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
+
+DEMO_SHOT_OFFSETS_MM = [
+    (1.2, -0.8),
+    (-2.1, 1.5),
+    (0.4, 2.9),
+    (-3.3, -2.2),
+    (2.6, 0.7),
+    (-0.9, -1.6),
+    (4.1, 1.8),
+    (-1.7, 3.0),
+    (0.3, -0.5),
+    (3.2, -3.4),
+]
 
 HTML_CONTENT = """
 <!DOCTYPE html>
@@ -84,6 +98,15 @@ HTML_CONTENT = """
         button.snap-btn:hover { background: var(--brass-deep); }
         button.snap-btn:focus-visible { outline: 2px solid var(--gunmetal); outline-offset: 2px; }
 
+        button.demo-btn {
+            display: block; width: 100%;
+            background: none; color: var(--brass-deep); border: 1px solid var(--brass);
+            padding: 12px; font-family: 'Inter', sans-serif; font-weight: 500; font-size: 14.5px;
+            border-radius: 8px; cursor: pointer; transition: background .15s ease;
+        }
+        button.demo-btn:hover { background: var(--paper); }
+        button.demo-btn:focus-visible { outline: 2px solid var(--gunmetal); outline-offset: 2px; }
+
         button.save-btn {
             display: block; width: 100%;
             background: none; color: var(--gunmetal); border: 1px solid var(--paper-edge);
@@ -99,6 +122,7 @@ HTML_CONTENT = """
 
         #results { margin-top: 20px; }
         #results h3 { font-family: 'Oswald', sans-serif; font-size: 13px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-soft); margin: 0 0 10px; font-weight: 500; }
+        .demo-note { margin: -4px 0 10px; font-size: 12.5px; color: var(--ink-soft); }
 
         .score-row {
             display: grid; grid-template-columns: 26px 1fr auto;
@@ -151,6 +175,8 @@ HTML_CONTENT = """
             <input type="file" id="cameraInput" accept="image/*" capture="environment" onchange="uploadImage()">
         </div>
 
+        <button class="demo-btn" onclick="runDemo()">Try a sample scan</button>
+
         <div id="loading">Reading target&hellip;</div>
 
         <div id="results"></div>
@@ -171,14 +197,53 @@ HTML_CONTENT = """
     </div>
 
     <script>
-        async function uploadImage() {
-            const input = document.getElementById('cameraInput');
-            if (!input.files[0]) return;
-
+        function startLoading() {
             document.getElementById('loading').style.display = 'block';
             document.getElementById('results').innerHTML = '';
             document.getElementById('scoredFrame').style.display = 'none';
             document.getElementById('overlayFrame').style.display = 'none';
+        }
+
+        function showResults(data) {
+            let html = data.is_demo
+                ? '<h3>Sample scan scores</h3><p class="demo-note">Demo data, not from your photo.</p>'
+                : '<h3>Your scores</h3>';
+
+            data.scores.forEach((score, idx) => {
+                const formattedScore = Number.isInteger(score) ? score.toFixed(1) : score;
+                html += `<div class="score-row">
+                    <span class="idx">${idx + 1}</span>
+                    <span class="row-label">Target #${idx + 1}</span>
+                    <span class="row-figures">
+                        <span class="row-score">${formattedScore}</span>
+                        <span class="row-dist">${data.distances[idx]} mm</span>
+                    </span>
+                </div>`;
+            });
+
+            const formattedTotal = Number.isInteger(data.total_score) ? data.total_score.toFixed(1) : data.total_score;
+            html += `<div class="total-panel"><span class="total-label">Total score</span><span class="total-value">${formattedTotal}</span></div>`;
+
+            document.getElementById('results').innerHTML = html;
+
+            const scoredFrame = document.getElementById('scoredFrame');
+            if (data.image_base64) {
+                document.getElementById('scoredImage').src = 'data:image/jpeg;base64,' + data.image_base64;
+                scoredFrame.style.display = 'block';
+            } else {
+                scoredFrame.style.display = 'none';
+            }
+
+            const overlayImg = document.getElementById('overlayImage');
+            overlayImg.src = 'data:image/jpeg;base64,' + data.overlay_image_base64;
+            document.getElementById('overlayFrame').style.display = 'block';
+        }
+
+        async function uploadImage() {
+            const input = document.getElementById('cameraInput');
+            if (!input.files[0]) return;
+
+            startLoading();
 
             const formData = new FormData();
             formData.append('file', input.files[0]);
@@ -194,35 +259,33 @@ HTML_CONTENT = """
                     return;
                 }
 
-                let html = '<h3>Your scores</h3>';
-                data.scores.forEach((score, idx) => {
-                    const formattedScore = Number.isInteger(score) ? score.toFixed(1) : score;
-                    html += `<div class="score-row">
-                        <span class="idx">${idx + 1}</span>
-                        <span class="row-label">Target #${idx + 1}</span>
-                        <span class="row-figures">
-                            <span class="row-score">${formattedScore}</span>
-                            <span class="row-dist">${data.distances[idx]} mm</span>
-                        </span>
-                    </div>`;
-                });
-
-                const formattedTotal = Number.isInteger(data.total_score) ? data.total_score.toFixed(1) : data.total_score;
-                html += `<div class="total-panel"><span class="total-label">Total score</span><span class="total-value">${formattedTotal}</span></div>`;
-
-                document.getElementById('results').innerHTML = html;
-
-                const img = document.getElementById('scoredImage');
-                img.src = 'data:image/jpeg;base64,' + data.image_base64;
-                document.getElementById('scoredFrame').style.display = 'block';
-
-                const overlayImg = document.getElementById('overlayImage');
-                overlayImg.src = 'data:image/jpeg;base64,' + data.overlay_image_base64;
-                document.getElementById('overlayFrame').style.display = 'block';
+                showResults(data);
 
             } catch (err) {
                 document.getElementById('loading').style.display = 'none';
                 alert('Upload failed: ' + err);
+            }
+        }
+
+        async function runDemo() {
+            startLoading();
+
+            try {
+                const response = await fetch('/demo');
+                const data = await response.json();
+
+                document.getElementById('loading').style.display = 'none';
+
+                if (data.error) {
+                    alert('Error loading demo: ' + data.error);
+                    return;
+                }
+
+                showResults(data);
+
+            } catch (err) {
+                document.getElementById('loading').style.display = 'none';
+                alert('Demo failed: ' + err);
             }
         }
 
@@ -279,6 +342,27 @@ def manifest():
 @app.get("/ping")
 def ping():
     return {"status": "awake"}
+
+@app.get("/demo")
+def demo():
+    try:
+        distances = [math.hypot(dx, dy) for dx, dy in DEMO_SHOT_OFFSETS_MM]
+        scores = [round(max(0.0, min(10.9, 10.9 - dist * 0.4)), 1) for dist in distances]
+
+        overlay_img = create_shot_overlay(DEMO_SHOT_OFFSETS_MM, "demo_overlay.jpg")
+        _, overlay_buffer = cv2.imencode(".jpg", overlay_img)
+        overlay_encoded = base64.b64encode(overlay_buffer.tobytes()).decode("utf-8")
+
+        return {
+            "scores": scores,
+            "distances": [round(dist, 2) for dist in distances],
+            "total_score": round(sum(scores), 1),
+            "image_base64": None,
+            "overlay_image_base64": overlay_encoded,
+            "is_demo": True
+        }
+    except Exception as e:
+        return {"error": str(e)}
 
 @app.post("/scan")
 async def scan_target_endpoint(file: UploadFile = File(...)):
