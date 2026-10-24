@@ -1,5 +1,7 @@
 import cv2
-import math
+import os
+import tempfile
+import threading
 import numpy as np
 import base64
 import uvicorn
@@ -7,24 +9,41 @@ from fastapi import FastAPI, File, UploadFile
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from scan_target import analyze_orion_target, create_shot_overlay
+from scan_target import analyze_orion_target
 
 app = FastAPI()
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
-DEMO_SHOT_OFFSETS_MM = [
-    (1.2, -0.8),
-    (-2.1, 1.5),
-    (0.4, 2.9),
-    (-3.3, -2.2),
-    (2.6, 0.7),
-    (-0.9, -1.6),
-    (4.1, 1.8),
-    (-1.7, 3.0),
-    (0.3, -0.5),
-    (3.2, -3.4),
-]
+DEMO_IMAGE_PATH = "static/demo_target.jpg"
+_demo_cache = None
+_demo_lock = threading.Lock()
+
+
+def _build_demo():
+    # Temp dir so the demo never touches the files /scan writes to.
+    with tempfile.TemporaryDirectory() as tmp:
+        scored_path = os.path.join(tmp, "scored.jpg")
+        overlay_path = os.path.join(tmp, "overlay.jpg")
+
+        scores, distances, total_score = analyze_orion_target(
+            DEMO_IMAGE_PATH, scored_path, overlay_path
+        )
+
+        with open(scored_path, "rb") as f:
+            scored_encoded = base64.b64encode(f.read()).decode("utf-8")
+        with open(overlay_path, "rb") as f:
+            overlay_encoded = base64.b64encode(f.read()).decode("utf-8")
+
+    return {
+        "scores": scores,
+        "distances": distances,
+        "total_score": total_score,
+        "image_base64": scored_encoded,
+        "overlay_image_base64": overlay_encoded,
+        "is_demo": True,
+    }
+
 
 HTML_CONTENT = """
 <!DOCTYPE html>
@@ -206,7 +225,7 @@ HTML_CONTENT = """
 
         function showResults(data) {
             let html = data.is_demo
-                ? '<h3>Sample scan scores</h3><p class="demo-note">Demo data, not from your photo.</p>'
+                ? '<h3>Sample scan scores</h3><p class="demo-note">Sample target photo, not your own.</p>'
                 : '<h3>Your scores</h3>';
 
             data.scores.forEach((score, idx) => {
@@ -345,22 +364,14 @@ def ping():
 
 @app.get("/demo")
 def demo():
+    global _demo_cache
     try:
-        distances = [math.hypot(dx, dy) for dx, dy in DEMO_SHOT_OFFSETS_MM]
-        scores = [round(max(0.0, min(10.9, 10.9 - dist * 0.4)), 1) for dist in distances]
-
-        overlay_img = create_shot_overlay(DEMO_SHOT_OFFSETS_MM, "demo_overlay.jpg")
-        _, overlay_buffer = cv2.imencode(".jpg", overlay_img)
-        overlay_encoded = base64.b64encode(overlay_buffer.tobytes()).decode("utf-8")
-
-        return {
-            "scores": scores,
-            "distances": [round(dist, 2) for dist in distances],
-            "total_score": round(sum(scores), 1),
-            "image_base64": None,
-            "overlay_image_base64": overlay_encoded,
-            "is_demo": True
-        }
+        # The sample photo never changes, so score it once and reuse the result.
+        if _demo_cache is None:
+            with _demo_lock:
+                if _demo_cache is None:
+                    _demo_cache = _build_demo()
+        return _demo_cache
     except Exception as e:
         return {"error": str(e)}
 
